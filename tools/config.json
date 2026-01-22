@@ -1,6 +1,8 @@
 {
-  "weekly_todo_size": 10,
+  "todo_size": 10,
   "exclude_premium": true,
+
+  "plan_auto_sync_days": 30,
 
   "section_pick_rules": [
     { "match": "基础", "mode": "all" },

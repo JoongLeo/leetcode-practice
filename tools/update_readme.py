@@ -1,25 +1,11 @@
 # -*- coding: utf-8 -*-
-"""
-Daily workflow:
-  1) Create new .cpp file
-  2) Run: python tools/update_readme.py
-It will:
-  - Update root README navigation (only existing dirs)
-  - Update each topic README index (only existing dirs/files)
-  - Generate a weekly TODO list in root README (frozen within the week)
-    based on endlesscheng lists, with your section picking rules.
-
-First time (or when lists update):
-  python tools/update_readme.py --sync-plan
-"""
-
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import re
-from datetime import date, datetime, timedelta, timezone
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote, urljoin
 from urllib.request import Request, urlopen
@@ -28,36 +14,64 @@ AUTO_START = "<!-- AUTO-GENERATED:START -->"
 AUTO_END = "<!-- AUTO-GENERATED:END -->"
 
 REPO_IGNORE_DIRS = {".git", ".vscode", ".idea", "__pycache__", "tools", "data"}
-
 CONFIG_PATH = Path("tools/config.json")
 PLAN_PATH = Path("data/endless_plan.json")
-WEEK_STATE_PATH = Path(".todo_week.json")
+TODO_STATE_PATH = Path("data/todo_state.json")
 
-# ------------ small utils ------------
+SOLVED_ID_RE = re.compile(r"^(\d+)\.")
+TAG_RE = re.compile(r"<[^>]+>")
+TOKEN_RE = re.compile(
+    r"(<h[1-6][^>]*>.*?</h[1-6]>)|(<p[^>]*>.*?</p>)|(<li[^>]*>.*?</li>)",
+    re.IGNORECASE | re.DOTALL,
+)
+H_RE = re.compile(r"<h([1-6])[^>]*>(.*?)</h\1>", re.IGNORECASE | re.DOTALL)
+P_RE = re.compile(r"<p[^>]*>(.*?)</p>", re.IGNORECASE | re.DOTALL)
+A_PROB_RE = re.compile(
+    r'<a[^>]+href="(?P<href>[^"]+)"[^>]*>(?P<text>\s*\d+\.\s*[^<]+)</a>',
+    re.IGNORECASE,
+)
 
-def find_repo_root(start: Path) -> Path:
-    cur = start.resolve()
-    for p in [cur, *cur.parents]:
-        if (p / ".git").exists():
-            return p
-    return start.resolve()
+DEFAULT_CONFIG = {
+    "todo_size": 10,
+    "exclude_premium": True,
+    "plan_auto_sync_days": 30,
+    "section_pick_rules": [
+        {"match": "基础", "mode": "all"},
+        {"match": "进阶", "mode": "first", "limit": 1},
+        {"match": "其他", "mode": "first", "limit": 1},
+        {"match": "思维扩展", "mode": "first", "limit": 1},
+    ],
+    "modules": [
+        {"name": "滑动窗口与双指针", "url": "https://leetcode.cn/discuss/post/0viNMK/"},
+    ],
+}
 
-def natural_key(s: str):
-    parts = re.split(r"(\d+)", s)
-    return [int(p) if p.isdigit() else p.lower() for p in parts]
 
-def is_dir_ignorable(name: str) -> bool:
-    return name in REPO_IGNORE_DIRS or name.startswith(".")
+@dataclass(frozen=True)
+class Rule:
+    tag: str
+    rx: re.Pattern
+    mode: str  # "all" or "first"
+    limit: int
 
-def md_link(text: str, rel_posix_path: str) -> str:
-    return f"[{text}]({quote(rel_posix_path, safe='/-_.~')})"
+
+def strip_tags(s: str) -> str:
+    s = TAG_RE.sub("", s)
+    return re.sub(r"\s+", " ", s).strip()
+
 
 def read_text(p: Path) -> str:
     return p.read_text(encoding="utf-8") if p.exists() else ""
 
+
 def write_text(p: Path, s: str) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(s, encoding="utf-8", newline="\n")
+
+
+def md_link(text: str, rel_posix_path: str) -> str:
+    return f"[{text}]({quote(rel_posix_path, safe='/-_.~')})"
+
 
 def replace_auto_section(original: str, new_section: str) -> str:
     if AUTO_START in original and AUTO_END in original:
@@ -69,32 +83,23 @@ def replace_auto_section(original: str, new_section: str) -> str:
         base += "\n\n"
     return f"{base}{AUTO_START}\n{new_section.rstrip()}\n{AUTO_END}\n"
 
-# ------------ config ------------
 
-DEFAULT_CONFIG = {
-    "weekly_todo_size": 10,
-    "exclude_premium": True,
-    "section_pick_rules": [
-        {"match": "基础", "mode": "all"},
-        {"match": "进阶", "mode": "first", "limit": 1},
-        {"match": "其他", "mode": "first", "limit": 1},
-        {"match": "思维扩展", "mode": "first", "limit": 1},
-    ],
-    "modules": [
-        {"name": "滑动窗口与双指针", "url": "https://leetcode.cn/discuss/post/0viNMK/"},
-        {"name": "二分算法", "url": "https://leetcode.cn/discuss/post/SqopEo/"},
-        {"name": "单调栈", "url": "https://leetcode.cn/discuss/post/9oZFK9/"},
-        {"name": "网格图", "url": "https://leetcode.cn/discuss/post/YiXPXW/"},
-        {"name": "位运算", "url": "https://leetcode.cn/discuss/post/dHn9Vk/"},
-        {"name": "图论算法", "url": "https://leetcode.cn/discuss/post/01LUak/"},
-        {"name": "动态规划", "url": "https://leetcode.cn/discuss/post/tXLS3i/"},
-        {"name": "常用数据结构", "url": "https://leetcode.cn/discuss/post/mOr1u6/"},
-        {"name": "数学算法", "url": "https://leetcode.cn/discuss/post/IYT3ss/"},
-        {"name": "贪心与思维", "url": "https://leetcode.cn/discuss/post/g6KTKL/"},
-        {"name": "链表、树与回溯", "url": "https://leetcode.cn/discuss/post/K0n2gO/"},
-        {"name": "字符串", "url": "https://leetcode.cn/discuss/post/SJFwQI/"},
-    ],
-}
+def natural_key(s: str):
+    parts = re.split(r"(\d+)", s)
+    return [int(p) if p.isdigit() else p.lower() for p in parts]
+
+
+def is_dir_ignorable(name: str) -> bool:
+    return name in REPO_IGNORE_DIRS or name.startswith(".")
+
+
+def find_repo_root(start: Path) -> Path:
+    cur = start.resolve()
+    for p in [cur, *cur.parents]:
+        if (p / ".git").exists():
+            return p
+    return start.resolve()
+
 
 def load_config(repo_root: Path) -> dict:
     p = repo_root / CONFIG_PATH
@@ -102,13 +107,208 @@ def load_config(repo_root: Path) -> dict:
         write_text(p, json.dumps(DEFAULT_CONFIG, ensure_ascii=False, indent=2))
         return DEFAULT_CONFIG
     try:
-        return json.loads(read_text(p))
+        cfg = json.loads(read_text(p))
+        merged = dict(DEFAULT_CONFIG)
+        merged.update(cfg)
+        # merge nested lists if provided
+        if "section_pick_rules" in cfg:
+            merged["section_pick_rules"] = cfg["section_pick_rules"]
+        if "modules" in cfg:
+            merged["modules"] = cfg["modules"]
+        return merged
     except Exception:
         return DEFAULT_CONFIG
 
-# ------------ repo scan (solved ids) ------------
 
-SOLVED_ID_RE = re.compile(r"^(\d+)\.")
+def http_get(url: str, timeout: int = 30) -> str:
+    req = Request(url, headers={"User-Agent": "leetcode-practice-bot/1.0"}, method="GET")
+    with urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", errors="ignore")
+
+
+def parse_problem_text(text: str) -> tuple[int, str]:
+    text = re.sub(r"\s+", " ", text).strip()
+    m = re.match(r"^(\d+)\.\s*(.+)$", text)
+    if not m:
+        raise ValueError(text)
+    return int(m.group(1)), m.group(2).strip()
+
+
+def compile_rules(cfg: dict) -> list[Rule]:
+    rules_cfg = cfg.get("section_pick_rules", [])
+    rules: list[Rule] = []
+    for r in rules_cfg:
+        tag = str(r.get("match", "")).strip() or "默认"
+        rules.append(
+            Rule(
+                tag=tag,
+                rx=re.compile(tag, re.IGNORECASE),
+                mode=str(r.get("mode", "all")).strip(),
+                limit=int(r.get("limit", 1)),
+            )
+        )
+    return rules
+
+
+def is_section_title(txt: str, rules: list[Rule]) -> bool:
+    if not txt or len(txt) > 60:
+        return False
+    return any(rule.rx.search(txt) for rule in rules)
+
+
+def parse_module(url: str, module_name: str, rules: list[Rule]) -> list[dict]:
+    """
+    Extract problems while tracking:
+      - point: the current "小点" header (e.g., 定长/不定长/单序列...)
+      - section: the current section header (e.g., §1.1 基础 / §1.2 进阶（选做）)
+    """
+    html = http_get(url)
+
+    cur_point = ""
+    cur_section = ""
+
+    out: list[dict] = []
+    seen: set[int] = set()
+
+    for m in TOKEN_RE.finditer(html):
+        token = m.group(0)
+
+        hm = H_RE.search(token)
+        if hm:
+            text = strip_tags(hm.group(2))
+            if is_section_title(text, rules):
+                cur_section = text
+            else:
+                cur_point = text
+            continue
+
+        pm = P_RE.search(token)
+        if pm:
+            text = strip_tags(pm.group(1))
+            if is_section_title(text, rules):
+                cur_section = text
+            continue
+
+        am = A_PROB_RE.search(token)
+        if not am:
+            continue
+        raw_text = strip_tags(am.group("text"))
+        try:
+            pid, title = parse_problem_text(raw_text)
+        except Exception:
+            continue
+        if pid in seen:
+            continue
+
+        href = am.group("href")
+        prob_url = urljoin(url, href)
+        premium = "会员题" in strip_tags(token)
+
+        out.append(
+            {
+                "module": module_name,
+                "point": cur_point or "",
+                "section": cur_section or "",
+                "id": pid,
+                "title": title,
+                "url": prob_url,
+                "premium": premium,
+            }
+        )
+        seen.add(pid)
+
+    return out
+
+
+def should_sync_plan(repo_root: Path, cfg: dict) -> bool:
+    p = repo_root / PLAN_PATH
+    if not p.exists():
+        return True
+    try:
+        plan = json.loads(read_text(p))
+        ts = plan.get("synced_at", "")
+        # synced_at like "2026-01-22T12:34:56Z"
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        days = int(cfg.get("plan_auto_sync_days", 30))
+        return datetime.now(timezone.utc) - dt > timedelta(days=days)
+    except Exception:
+        return True
+
+
+def sync_plan(repo_root: Path, cfg: dict) -> dict:
+    rules = compile_rules(cfg)
+    modules = []
+    for mod in cfg.get("modules", []):
+        name, url = mod["name"], mod["url"]
+        probs = parse_module(url, name, rules)
+        modules.append({"name": name, "source": url, "problems": probs})
+
+    plan = {
+        "version": 4,
+        "synced_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "modules": modules,
+    }
+    write_text(repo_root / PLAN_PATH, json.dumps(plan, ensure_ascii=False, indent=2))
+    return plan
+
+
+def load_plan(repo_root: Path) -> dict | None:
+    p = repo_root / PLAN_PATH
+    if not p.exists():
+        return None
+    try:
+        return json.loads(read_text(p))
+    except Exception:
+        return None
+
+
+def pick_tag(section: str, rules: list[Rule]) -> Rule | None:
+    for r in rules:
+        if r.rx.search(section or ""):
+            return r
+    return None
+
+
+def apply_pick_rules(plan: dict, cfg: dict) -> list[dict]:
+    """
+    Apply rules per: (module, point, rule_tag)
+    - 基础: keep all
+    - 进阶/其他/思维扩展: keep first K
+    Also exclude premium if configured.
+    Keep original order.
+    """
+    exclude_premium = bool(cfg.get("exclude_premium", True))
+    rules = compile_rules(cfg)
+
+    kept_count: dict[tuple[str, str, str], int] = {}
+    out: list[dict] = []
+
+    for mod in plan.get("modules", []):
+        for p in mod.get("problems", []):
+            if exclude_premium and p.get("premium"):
+                continue
+
+            module = p.get("module", mod.get("name", ""))
+            point = p.get("point", "") or ""
+            section = p.get("section", "") or ""
+
+            rule = pick_tag(section, rules)
+            # default: treat as "all" (don’t accidentally drop)
+            if rule is None:
+                out.append(p)
+                continue
+
+            key = (module, point, rule.tag)
+            if rule.mode == "all":
+                out.append(p)
+            else:  # "first"
+                c = kept_count.get(key, 0)
+                if c < rule.limit:
+                    out.append(p)
+                    kept_count[key] = c + 1
+
+    return out
+
 
 def collect_solved_ids(repo_root: Path) -> set[int]:
     solved = set()
@@ -121,282 +321,170 @@ def collect_solved_ids(repo_root: Path) -> set[int]:
             solved.add(int(m.group(1)))
     return solved
 
-# ------------ readme navigation (only existing) ------------
 
 def list_topics(repo_root: Path) -> list[Path]:
     topics = [p for p in repo_root.iterdir() if p.is_dir() and not is_dir_ignorable(p.name)]
     topics.sort(key=lambda x: natural_key(x.name))
     return topics
 
+
 def list_subcats(topic_dir: Path) -> list[Path]:
     subs = [p for p in topic_dir.iterdir() if p.is_dir() and not is_dir_ignorable(p.name)]
     subs.sort(key=lambda x: natural_key(x.name))
     return subs
+
 
 def list_cpp_files(folder: Path) -> list[Path]:
     files = [p for p in folder.iterdir() if p.is_file() and p.suffix.lower() == ".cpp"]
     files.sort(key=lambda x: natural_key(x.name))
     return files
 
-# ------------ endless plan sync & parse (section-aware) ------------
 
-def http_get(url: str, timeout: int = 30) -> str:
-    req = Request(url, headers={"User-Agent": "leetcode-practice-bot/1.0"}, method="GET")
-    with urlopen(req, timeout=timeout) as resp:
-        return resp.read().decode("utf-8", errors="ignore")
-
-TAG_RE = re.compile(r"<[^>]+>")
-def strip_tags(s: str) -> str:
-    return re.sub(r"\s+", " ", TAG_RE.sub("", s)).strip()
-
-# tokens: headers + paragraphs + list items (to catch "思维扩展（选做）" etc)
-TOKEN_RE = re.compile(
-    r"(<h[1-6][^>]*>.*?</h[1-6]>)|(<p[^>]*>.*?</p>)|(<li[^>]*>.*?</li>)",
-    re.IGNORECASE | re.DOTALL
-)
-H_RE = re.compile(r"<h[1-6][^>]*>(.*?)</h[1-6]>", re.IGNORECASE | re.DOTALL)
-P_RE = re.compile(r"<p[^>]*>(.*?)</p>", re.IGNORECASE | re.DOTALL)
-
-A_PROB_RE = re.compile(
-    r'<a[^>]+href="(?P<href>[^"]+)"[^>]*>(?P<text>\s*\d+\.\s*[^<]+)</a>',
-    re.IGNORECASE
-)
-
-def parse_problem_text(text: str) -> tuple[int, str]:
-    text = re.sub(r"\s+", " ", text).strip()
-    m = re.match(r"^(\d+)\.\s*(.+)$", text)
-    if not m:
-        raise ValueError(text)
-    return int(m.group(1)), m.group(2).strip()
-
-def is_section_title(txt: str) -> bool:
-    # short-ish and contains key words, avoid normal paragraphs
-    if not txt:
-        return False
-    if len(txt) > 40:
-        return False
-    keys = ("基础", "进阶", "选做", "其他", "思维扩展")
-    return any(k in txt for k in keys)
-
-def parse_module(post_url: str, module_name: str) -> list[dict]:
-    html = http_get(post_url)
-    cur_section = ""
-    out: list[dict] = []
-    seen: set[int] = set()
-
-    for m in TOKEN_RE.finditer(html):
-        token = m.group(0)
-
-        hm = H_RE.search(token)
-        if hm:
-            t = strip_tags(hm.group(1))
-            if is_section_title(t):
-                cur_section = t
-            continue
-
-        pm = P_RE.search(token)
-        if pm:
-            t = strip_tags(pm.group(1))
-            if is_section_title(t):
-                cur_section = t
-            continue
-
-        # li
-        am = A_PROB_RE.search(token)
-        if not am:
-            continue
-        raw_text = strip_tags(am.group("text"))
-        try:
-            pid, title = parse_problem_text(raw_text)
-        except Exception:
-            continue
-        if pid in seen:
-            continue
-        href = am.group("href")
-        prob_url = urljoin(post_url, href)
-        premium = "会员题" in strip_tags(token)
-        out.append({
-            "module": module_name,
-            "section": cur_section or "",
-            "id": pid,
-            "title": title,
-            "url": prob_url,
-            "premium": premium,
-        })
-        seen.add(pid)
-
-    return out
-
-def sync_plan(repo_root: Path, config: dict) -> dict:
-    modules = []
-    for mod in config.get("modules", []):
-        name, url = mod["name"], mod["url"]
-        try:
-            probs = parse_module(url, name)
-        except Exception:
-            probs = []
-        modules.append({"name": name, "source": url, "problems": probs})
-    plan = {
-                "version": 2,
-                "synced_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
-                "modules": modules,
-            }
-    write_text(repo_root / PLAN_PATH, json.dumps(plan, ensure_ascii=False, indent=2))
-    return plan
-
-def load_plan(repo_root: Path) -> dict | None:
-    p = repo_root / PLAN_PATH
+def load_todo_state(repo_root: Path) -> dict:
+    p = repo_root / TODO_STATE_PATH
     if not p.exists():
-        return None
+        return {}
     try:
         return json.loads(read_text(p))
     except Exception:
-        return None
+        return {}
 
-def apply_section_rules(plan: dict, config: dict) -> list[dict]:
-    exclude_premium = bool(config.get("exclude_premium", True))
-    rules_cfg = config.get("section_pick_rules", [])
-    rules = []
-    for r in rules_cfg:
-        rules.append({
-            "re": re.compile(r.get("match", ""), re.IGNORECASE),
-            "mode": r.get("mode", "all"),
-            "limit": int(r.get("limit", 1)),
-        })
 
-    def pick_rule(section: str):
-        for rr in rules:
-            if rr["re"].search(section or ""):
-                return rr
-        return {"mode": "all", "limit": 10**9}
+def save_todo_state(repo_root: Path, state: dict) -> None:
+    write_text(repo_root / TODO_STATE_PATH, json.dumps(state, ensure_ascii=False, indent=2))
 
-    flat: list[dict] = []
-    # (module, section) -> count kept for "first" mode
-    kept_count: dict[tuple[str, str], int] = {}
 
-    for mod in plan.get("modules", []):
-        for p in mod.get("problems", []):
-            if exclude_premium and p.get("premium"):
-                continue
-            module = p.get("module") or mod.get("name", "")
-            section = p.get("section", "") or ""
-            rr = pick_rule(section)
-            if rr["mode"] == "all":
-                flat.append(p)
-            elif rr["mode"] == "first":
-                key = (module, section)
-                c = kept_count.get(key, 0)
-                if c < rr["limit"]:
-                    flat.append(p)
-                    kept_count[key] = c + 1
-            # else: skip
-    return flat
+def choose_current_module(cfg: dict, filtered: list[dict], solved: set[int], state: dict) -> str | None:
+    modules = [m["name"] for m in cfg.get("modules", [])]
+    by_mod: dict[str, list[dict]] = {name: [] for name in modules}
+    for x in filtered:
+        by_mod.setdefault(x["module"], []).append(x)
 
-# ------------ weekly todo (frozen within week) ------------
+    # keep state module if it still has remaining tasks (or we already have a todo list there)
+    cur = state.get("module")
+    if cur in by_mod:
+        if any(int(p["id"]) not in solved for p in by_mod[cur]):
+            return cur
 
-def week_start_monday(d: date) -> date:
-    return d - timedelta(days=d.weekday())
+    # otherwise pick first module with remaining tasks
+    for name in modules:
+        if any(int(p["id"]) not in solved for p in by_mod.get(name, [])):
+            return name
+    return None
 
-def load_week_state(repo_root: Path) -> dict | None:
-    p = repo_root / WEEK_STATE_PATH
-    if not p.exists():
-        return None
-    try:
-        return json.loads(read_text(p))
-    except Exception:
-        return None
 
-def save_week_state(repo_root: Path, state: dict) -> None:
-    write_text(repo_root / WEEK_STATE_PATH, json.dumps(state, ensure_ascii=False, indent=2))
-
-def make_weekly_ids(flat: list[dict], solved: set[int], n: int) -> list[int]:
+def build_todo_ids_for_module(module_name: str, filtered: list[dict], solved: set[int], n: int) -> list[int]:
+    mod_list = [x for x in filtered if x["module"] == module_name]
     ids = []
-    for x in flat:
+    for x in mod_list:
         pid = int(x["id"])
         if pid in solved:
             continue
         ids.append(pid)
         if len(ids) >= n:
             break
+    # 不跨模块凑数：不足 n 就返回不足 n
     return ids
 
-def weekly_block(repo_root: Path, flat: list[dict], solved: set[int], n: int) -> str:
-    today = date.today()
-    ws = week_start_monday(today)
-    we = ws + timedelta(days=6)
 
-    state = load_week_state(repo_root)
-    if state and state.get("week_start") == ws.isoformat():
-        todo_ids = state.get("todo_ids", [])
-    else:
-        todo_ids = make_weekly_ids(flat, solved, n)
-        save_week_state(repo_root, {"week_start": ws.isoformat(), "todo_ids": todo_ids})
+def ensure_todo_list(cfg: dict, filtered: list[dict], solved: set[int]) -> tuple[str | None, list[int]]:
+    """
+    Maintain a stable todo list (fixed size) per current module:
+      - Keep existing list until全部完成
+      - Then regenerate next N unsolved in the same module
+      - If module剩余不足N，不硬凑
+      - If module完成，自动切换到下一个模块
+    """
+    n = int(cfg.get("todo_size", 10))
+    state = load_todo_state(Path.cwd())
+    cur_mod = choose_current_module(cfg, filtered, solved, state)
+    if not cur_mod:
+        save_todo_state(Path.cwd(), {"module": None, "todo_ids": []})
+        return None, []
 
-    info = {int(x["id"]): x for x in flat}
+    # map for validation
+    valid_ids = {int(x["id"]) for x in filtered if x["module"] == cur_mod}
 
-    lines = [f"## 本周 TODO（{ws.isoformat()} ~ {we.isoformat()}）"]
-    if not todo_ids:
-        lines.append("_（已无待刷题目 / 未能生成 TODO）_")
-        return "\n".join(lines)
+    old_mod = state.get("module")
+    old_ids = [int(x) for x in state.get("todo_ids", []) if isinstance(x, int) or (isinstance(x, str) and x.isdigit())]
 
-    for pid in todo_ids:
-        x = info.get(pid)
-        checked = "x" if pid in solved else " "
-        if not x:
-            lines.append(f"- [{checked}] {pid}")
-            continue
-        title = f"{pid}. {x.get('title','')}"
-        module = x.get("module", "")
-        url = x.get("url", "")
-        lines.append(f"- [{checked}]  [{title}]({url})")
-    return "\n".join(lines)
+    # if module switched or old list invalid => rebuild
+    if old_mod != cur_mod or any(pid not in valid_ids for pid in old_ids):
+        new_ids = build_todo_ids_for_module(cur_mod, filtered, solved, n)
+        save_todo_state(Path.cwd(), {"module": cur_mod, "todo_ids": new_ids})
+        return cur_mod, new_ids
 
-# ------------ README render ------------
+    # keep list until all solved
+    if old_ids and all(pid in solved for pid in old_ids):
+        new_ids = build_todo_ids_for_module(cur_mod, filtered, solved, n)
+        save_todo_state(Path.cwd(), {"module": cur_mod, "todo_ids": new_ids})
+        return cur_mod, new_ids
 
-def ensure_root_header(existing: str) -> str:
-    return existing if existing.strip() else "# leetcode-practice\n\n"
+    # if empty list (e.g., first time) => build
+    if not old_ids:
+        new_ids = build_todo_ids_for_module(cur_mod, filtered, solved, n)
+        save_todo_state(Path.cwd(), {"module": cur_mod, "todo_ids": new_ids})
+        return cur_mod, new_ids
 
-def ensure_topic_header(existing: str, topic_name: str) -> str:
-    return existing if existing.strip() else f"# {topic_name}\n\n"
+    # otherwise keep current
+    return cur_mod, old_ids
 
-def root_auto(repo_root: Path, topics: list[Path], flat: list[dict], cfg: dict) -> str:
-    solved = collect_solved_ids(repo_root)
-    weekly_n = int(cfg.get("weekly_todo_size", 10))
+
+def render_root_auto(repo_root: Path, cfg: dict, filtered: list[dict], solved: set[int]) -> str:
+    # TODO
+    mod, todo_ids = ensure_todo_list(cfg, filtered, solved)
+    info = {int(x["id"]): x for x in filtered}
 
     lines = []
-    lines.append(weekly_block(repo_root, flat, solved, weekly_n))
+    lines.append("## TODO")
+    if not mod:
+        lines.append("_（题单已刷完 / 无待办）_")
+    else:
+        lines.append(f"**当前模块**：{mod}")
+        if not todo_ids:
+            lines.append("_（本模块已无待刷题目）_")
+        else:
+            for pid in todo_ids:
+                x = info.get(pid)
+                checked = "x" if pid in solved else " "
+                if not x:
+                    lines.append(f"- [{checked}] {pid}")
+                    continue
+                title = f"{pid}. {x.get('title','')}"
+                point = (x.get("point") or "").strip()
+                tag = f"{mod}" + (f" / {point}" if point else "")
+                lines.append(f"- [{checked}]  [{title}]({x.get('url','')})")
 
-    total = len({int(x["id"]) for x in flat})
-    done = len(set(solved) & {int(x["id"]) for x in flat})
+    # progress
+    ids_in_plan = {int(x["id"]) for x in filtered}
+    done = len(ids_in_plan & solved)
+    total = len(ids_in_plan)
     lines.append("")
-    lines.append(f"**题单进度**：{done}/{total}（只统计非会员题 + 选做规则过滤后的题单）")
+    lines.append(f"**题单进度**：{done}/{total}（非会员 + 选做规则过滤后）")
     lines.append("\n---\n")
 
+    # navigation (only existing)
     lines.append("## 当前目录")
+    topics = list_topics(repo_root)
     if not topics:
         lines.append("_（暂无内容）_")
-        return "\n".join(lines)
-
-    for topic in topics:
-        rel_topic = topic.relative_to(repo_root).as_posix() + "/"
-        cpp_count = sum(len(list_cpp_files(sub)) for sub in list_subcats(topic))
-        topic_text = f"{topic.name}（{cpp_count} 题）" if cpp_count else topic.name
-        lines.append(f"- {md_link(topic_text, rel_topic)}")
-        for sub in list_subcats(topic):
-            rel_sub = sub.relative_to(repo_root).as_posix() + "/"
-            c = len(list_cpp_files(sub))
-            sub_text = f"{sub.name}（{c}）" if c else sub.name
-            lines.append(f"  - {md_link(sub_text, rel_sub)}")
+    else:
+        for topic in topics:
+            rel_topic = topic.relative_to(repo_root).as_posix() + "/"
+            cpp_count = sum(len(list_cpp_files(sub)) for sub in list_subcats(topic))
+            lines.append(f"- {md_link(f'{topic.name}（{cpp_count} 题）', rel_topic)}")
+            for sub in list_subcats(topic):
+                rel_sub = sub.relative_to(repo_root).as_posix() + "/"
+                lines.append(f"  - {md_link(f'{sub.name}（{len(list_cpp_files(sub))}）', rel_sub)}")
 
     lines.append("")
-    lines.append("## 日常使用")
-    lines.append("新增 `.cpp` 后运行：")
     lines.append("```bash")
     lines.append("python tools/update_readme.py")
     lines.append("```")
     return "\n".join(lines)
 
-def topic_auto(repo_root: Path, topic_dir: Path) -> str:
+
+def render_topic_auto(topic_dir: Path) -> str:
     subs = list_subcats(topic_dir)
     if not subs:
         return "_（暂无小类目录）_"
@@ -404,9 +492,7 @@ def topic_auto(repo_root: Path, topic_dir: Path) -> str:
     lines = ["## 小类导航"]
     for sub in subs:
         rel = sub.relative_to(topic_dir).as_posix() + "/"
-        c = len(list_cpp_files(sub))
-        txt = f"{sub.name}（{c}）" if c else sub.name
-        lines.append(f"- {md_link(txt, rel)}")
+        lines.append(f"- {md_link(f'{sub.name}（{len(list_cpp_files(sub))}）', rel)}")
 
     lines.append("")
     lines.append("## 题目索引")
@@ -422,11 +508,12 @@ def topic_auto(repo_root: Path, topic_dir: Path) -> str:
 
     return "\n".join(lines)
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--sync-plan", action="store_true", help="Sync endless plan from leetcode.cn discuss posts")
-    args = ap.parse_args()
 
+def ensure_header(existing: str, header: str) -> str:
+    return existing if existing.strip() else header
+
+
+def main():
     script_dir = Path(__file__).resolve().parent
     repo_root = find_repo_root(script_dir)
     os.chdir(repo_root)
@@ -434,25 +521,34 @@ def main():
     cfg = load_config(repo_root)
 
     plan = load_plan(repo_root)
-    if args.sync_plan or plan is None:
-        plan = sync_plan(repo_root, cfg)
+    if plan is None or should_sync_plan(repo_root, cfg):
+        try:
+            plan = sync_plan(repo_root, cfg)
+        except Exception:
+            # fallback to cached if sync fails mid-run
+            plan = load_plan(repo_root)
 
-    flat = apply_section_rules(plan, cfg)
+    filtered: list[dict] = []
+    if plan:
+        filtered = apply_pick_rules(plan, cfg)
+
+    solved = collect_solved_ids(repo_root)
 
     # root README
     root_path = repo_root / "README.md"
-    root_existing = ensure_root_header(read_text(root_path))
-    root_new = replace_auto_section(root_existing, root_auto(repo_root, list_topics(repo_root), flat, cfg))
+    root_existing = ensure_header(read_text(root_path), "# leetcode-practice\n\n")
+    root_new = replace_auto_section(root_existing, render_root_auto(repo_root, cfg, filtered, solved))
     write_text(root_path, root_new)
 
     # topic READMEs
     for topic in list_topics(repo_root):
         tp = topic / "README.md"
-        existing = ensure_topic_header(read_text(tp), topic.name)
-        new = replace_auto_section(existing, topic_auto(repo_root, topic))
+        existing = ensure_header(read_text(tp), f"# {topic.name}\n\n")
+        new = replace_auto_section(existing, render_topic_auto(topic))
         write_text(tp, new)
 
     print("✅ updated README(s)")
+
 
 if __name__ == "__main__":
     main()
