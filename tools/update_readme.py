@@ -19,7 +19,7 @@ import argparse
 import json
 import os
 import re
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote, urljoin
 from urllib.request import Request, urlopen
@@ -50,7 +50,7 @@ def is_dir_ignorable(name: str) -> bool:
     return name in REPO_IGNORE_DIRS or name.startswith(".")
 
 def md_link(text: str, rel_posix_path: str) -> str:
-    return f"[{text}]({quote(rel_posix_path, safe='/\-_.~')})"
+    return f"[{text}]({quote(rel_posix_path, safe='/-_.~')})"
 
 def read_text(p: Path) -> str:
     return p.read_text(encoding="utf-8") if p.exists() else ""
@@ -236,7 +236,11 @@ def sync_plan(repo_root: Path, config: dict) -> dict:
         except Exception:
             probs = []
         modules.append({"name": name, "source": url, "problems": probs})
-    plan = {"version": 2, "synced_at": datetime.utcnow().isoformat(timespec="seconds") + "Z", "modules": modules}
+    plan = {
+                "version": 2,
+                "synced_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+                "modules": modules,
+            }
     write_text(repo_root / PLAN_PATH, json.dumps(plan, ensure_ascii=False, indent=2))
     return plan
 

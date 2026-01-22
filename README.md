@@ -1,5 +1,4 @@
 # leetcode-practice
-
 <!-- AUTO-GENERATED:START -->
 ## 本周 TODO（2026-01-19 ~ 2026-01-25）
 - [ ]  [643. 子数组最大平均数 I](https://leetcode.cn/problems/maximum-average-subarray-i/)
