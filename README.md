@@ -10,6 +10,6 @@
 每天只需要：新增 `.cpp` 文件 → 运行脚本更新目录：
 
 ```bash
-python tools/update_readme.py
+python update_readme.py
 ```
 <!-- AUTO-GENERATED:END -->

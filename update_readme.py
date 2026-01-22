@@ -152,7 +152,7 @@ def generate_root_auto(repo_root: Path, topics: list[Path]) -> str:
     lines.append("每天只需要：新增 `.cpp` 文件 → 运行脚本更新目录：")
     lines.append("")
     lines.append("```bash")
-    lines.append("python tools/update_readme.py")
+    lines.append("python update_readme.py")
     lines.append("```")
     return "\n".join(lines)
 
