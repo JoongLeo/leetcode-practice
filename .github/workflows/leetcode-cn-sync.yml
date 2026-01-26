@@ -1,9 +1,9 @@
-﻿name: Sync LeetCode CN (AC to Repo)
+name: Sync LeetCode CN (AC to Repo)
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "10 */3 * * *"   # 每 3 小时一次（UTC）
+    - cron: "10 */3 * * *"
 
 concurrency:
   group: leetcode-cn-sync
@@ -38,7 +38,7 @@ jobs:
         run: |
           python tools/sync_leetcode_cn.py --limit 20 --max-pages 30
 
-      - name: Commit & Push (if changed)
+      - name: Commit and push (if changed)
         run: |
           git config user.name "leetcode-cn-bot"
           git config user.email "leetcode-cn-bot@users.noreply.github.com"
