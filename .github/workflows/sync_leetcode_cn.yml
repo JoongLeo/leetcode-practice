@@ -31,17 +31,12 @@ jobs:
           python -m pip install -U pip
           pip install requests
 
-      - name: Sync from leetcode.cn (download + rename + move)
+      - name: Sync from leetcode.cn (download + classify + move)
         env:
           LEETCODE_CN_CSRF_TOKEN: ${{ secrets.LEETCODE_CN_CSRF_TOKEN }}
           LEETCODE_CN_SESSION: ${{ secrets.LEETCODE_CN_SESSION }}
         run: |
           python -u tools/sync_leetcode_cn.py
-          echo "==== git status after sync ===="
-          git status --porcelain
-          echo "==== recent files (top 50) ===="
-          find . -maxdepth 3 -type f \( -name "*.cpp" -o -name "*.py" \) | head -n 50
-
 
       - name: Update README (auto)
         run: |
@@ -61,13 +56,13 @@ jobs:
           git add README.md || true
           if [ -d tools ]; then git add tools; fi
           if [ -d data ]; then git add data; fi
+
+          # 你现在已有的顶层分类目录（可继续加）
           if [ -d "滑动窗口与双指针" ]; then git add "滑动窗口与双指针"; fi
 
-          # 有变更才提交
           if ! git diff --cached --quiet; then
             git commit -m "[Auto] Sync LeetCode CN + Update README"
             git push
           else
             echo "No changes to commit."
           fi
-
