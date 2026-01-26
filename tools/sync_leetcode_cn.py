@@ -55,9 +55,28 @@ def ensure_dir(p: Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
 
 def load_json(path: Path, default):
-    if path.exists():
-        return json.loads(path.read_text(encoding="utf-8"))
-    return default
+    """
+    Robust JSON loader:
+    - if file missing -> default
+    - if empty/whitespace -> default
+    - if invalid JSON -> backup and default
+    """
+    if not path.exists():
+        return default
+    try:
+        txt = path.read_text(encoding="utf-8").strip()
+        if not txt:
+            return default
+        return json.loads(txt)
+    except Exception:
+        # backup the broken file for debugging, then recover
+        try:
+            bak = path.with_suffix(path.suffix + ".bak")
+            bak.write_text(path.read_text(encoding="utf-8", errors="ignore"), encoding="utf-8")
+        except Exception:
+            pass
+        return default
+
 
 def save_json(path: Path, obj) -> None:
     ensure_dir(path.parent)
