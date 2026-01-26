@@ -22,8 +22,8 @@ LAST_REPORT_PATH = DATA_DIR / "last_sync_report.json"
 MAX_DETAIL_PER_RUN = int(os.getenv("MAX_DETAIL_PER_RUN", "8"))
 
 # 你的首行注释规范：
-# // 一级-二级-2841. 题名.cpp
-HEADER_RE = re.compile(r"^\s*//\s*(.+?)\s*$")
+ # // 一级-二级-2841. 题名.cpp
+HEADER_RE = re.compile(r"^\s*(?://|#)\s*(.+?)\s*$")
 FILENAME_TAIL_RE = re.compile(r"^\s*(\d+)\.\s*(.+?)\.(cpp|py|java|js|ts|go|rs|c|cs|kt|swift|rb|php|txt)\s*$", re.IGNORECASE)
 
 

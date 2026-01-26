@@ -1,13 +1,13 @@
-# tools/update_readme.py
+﻿# tools/update_readme.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import json
 import os
 import re
-import json
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
-from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 AUTO_START = "<!-- AUTO-GENERATED:START -->"
@@ -133,7 +133,6 @@ def _fmt_time(ts: int | None, tz_name: str = "Asia/Shanghai") -> str:
         return ""
     tz = ZoneInfo(tz_name)
     dt = datetime.fromtimestamp(int(ts), tz=tz)
-    # 显示成北京时间/台北时间
     return dt.strftime("%Y-%m-%d %H:%M %Z")
 
 
@@ -157,11 +156,11 @@ def render_recent_updates(repo_root: Path, max_items: int = 8) -> str:
     if last_ts:
         meta.append(f"水位：{last_ts}")
     if meta:
-        lines.append(f"_（{' · '.join(meta)}）_")
+        lines.append(f"_（{' / '.join(meta)}）_")
         lines.append("")
 
     if wrote == 0 or not added:
-        lines.append("本次同步未发现符合「首行注释规范」的新 AC 提交。")
+        lines.append("本次同步未发现符合“首行注释规范”的新 AC 提交。")
         return "\n".join(lines)
 
     added = list(added)[-max_items:][::-1]
@@ -185,13 +184,13 @@ def render_root_auto(repo_root: Path) -> str:
     solved = collect_solved_ids(repo_root)
 
     lines: list[str] = []
-    lines.append("## 🚀 LeetCode 题解仓库（自动同步 + 自动分类）")
+    lines.append("## LeetCode 题解仓库（自动同步 + 自动分类）")
     lines.append("")
     lines.append(f"- ✅ 已归档：**{total_files}** 份代码")
-    lines.append(f"- 🧩 已识别题号：**{len(solved)}** 道")
+    lines.append(f"- 🧠 已识别题号：**{len(solved)}** 题")
     lines.append("- 🤖 自动化：LeetCode.cn 提交后，GitHub Actions 自动拉取并按首行注释分类")
     lines.append("")
-    lines.append("> 规则：提交代码首行必须写成：`// 一级-二级-1234. 题名.cpp`（否则不会入库）")
+    lines.append("> 规则：提交代码首行必须写成：`// 一级-二级-1234. 题名.cpp`（否则不入库）")
     lines.append("")
 
     lines.append("## 目录导航")
@@ -253,7 +252,7 @@ def main():
     root_new = replace_auto_section(root_existing, render_root_auto(repo_root))
     write_text(root_path, root_new)
 
-    # 遍历目录（跳过忽略树）
+    # traverse folders, skipping ignored roots
     def iter_dirs_skip_ignored(root: Path):
         stack = [root]
         while stack:
@@ -273,7 +272,7 @@ def main():
         new = replace_auto_section(existing, render_folder_auto(folder, repo_root))
         write_text(readme, new)
 
-    print("✅ updated README(s)")
+    print("updated README(s)")
 
 
 if __name__ == "__main__":

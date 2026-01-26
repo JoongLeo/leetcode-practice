@@ -1,9 +1,9 @@
-name: Sync LeetCode CN (Full Auto)
+﻿name: Sync LeetCode CN (Full Auto)
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "10 */3 * * *"   # 每3小时一次（UTC）
+    - cron: "10 */3 * * *"   # every 3 hours (UTC)
 
 concurrency:
   group: leetcode-cn-sync
@@ -49,28 +49,25 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # 绝对禁止提交 .github 下任何 README（避免 workflows 安全限制）
+          # Do not commit any README under .github (workflow safety).
           rm -f .github/README.md || true
           rm -f .github/workflows/README.md || true
 
-          # 只 add 允许的路径；存在才 add
-          git add README.md || true
-          if [ -d tools ]; then git add tools; fi
-          if [ -d data ]; then git add data; fi
-          if [ -d "滑动窗口与双指针" ]; then git add "滑动窗口与双指针"; fi
+          git add -A
+          git restore --staged .github || true
 
-          # 没有 staged 变化就退出
+          # Exit if nothing staged.
           if git diff --cached --quiet; then
             echo "No changes to commit."
             exit 0
           fi
 
-          # 从本次 staged 文件名中提取题号（最稳，不依赖 report）
+          # Extract problem IDs from staged file names.
           IDS=$(git diff --cached --name-only --diff-filter=AM \
             | python - <<'PY'
           import re, sys
           ids=set()
-          pat=re.compile(r'(^|/)(\d+)\.\s*')   # 文件名以 "1234." 开头
+          pat=re.compile(r'(^|/)(\d+)\.\s*')
           for line in sys.stdin:
               line=line.strip().replace("\\","/")
               m=pat.search(line)
