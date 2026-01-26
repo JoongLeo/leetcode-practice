@@ -138,7 +138,17 @@ def parse_header_path(code: str) -> Optional[Tuple[List[str], int, str, str]]:
     - title: 题名（来自注释尾段）
     - ext: cpp/py/...
     """
-    first_line = code.splitlines()[0] if code.splitlines() else ""
+    lines = code.splitlines()
+    if not lines:
+        return None
+    # Tolerate BOM or leading empty lines from platform formatting.
+    first_line = ""
+    for line in lines:
+        if line.strip():
+            first_line = line.lstrip("\ufeff")
+            break
+    if not first_line:
+        return None
     m = HEADER_RE.match(first_line)
     if not m:
         return None
