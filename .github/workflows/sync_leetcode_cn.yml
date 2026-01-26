@@ -46,5 +46,15 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A
+
+          # 绝对禁止提交 .github 下任何 README（避免 workflows 安全限制）
+          rm -f .github/README.md || true
+          rm -f .github/workflows/README.md || true
+
+          # 只 add 允许的路径（不要 git add -A）
+          git add README.md
+          git add tools || true
+          git add data || true
+          git add "滑动窗口与双指针" || true
+
           git diff --cached --quiet || (git commit -m "[Auto] Sync LeetCode CN + Update README" && git push)
