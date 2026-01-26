@@ -10,7 +10,7 @@ from urllib.parse import quote
 AUTO_START = "<!-- AUTO-GENERATED:START -->"
 AUTO_END = "<!-- AUTO-GENERATED:END -->"
 
-REPO_IGNORE_DIRS = {".git", ".vscode", ".idea", "__pycache__", "tools", "data"}
+REPO_IGNORE_DIRS = {".git", ".github", ".vscode", ".idea", "__pycache__", "tools", "data"}
 CODE_SUFFIXES = {".cpp", ".py", ".java", ".js", ".ts", ".go", ".rs", ".c", ".cs", ".kt", ".swift", ".rb", ".php", ".txt"}
 
 SOLVED_ID_RE = re.compile(r"^(\d+)\.\s*")
