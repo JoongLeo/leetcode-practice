@@ -1,49 +1,53 @@
 name: Sync LeetCode Submissions
 
 on:
+  # 每天北京时间 23:00 自动运行
   schedule:
-    # 每天北京时间 9:00 和 21:00 运行（UTC 1:00 和 13:00）
-    - cron: '0 1,13 * * *'
-  workflow_dispatch:  # 允许手动触发
+    - cron: '0 15 * * *'  # UTC 15:00 = 北京时间 23:00
+  
+  # 手动触发
+  workflow_dispatch:
+  
+  # 每次 push 到 main 分支时触发（用于测试）
+  push:
+    branches: [ main ]
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v3
+    - name: Checkout 代码
+      uses: actions/checkout@v4
       with:
-        fetch-depth: 0  # 获取完整历史记录
-        token: ${{ secrets.GITHUB_TOKEN }}
+        fetch-depth: 0  # 获取完整历史，便于 git 操作
     
-    - name: Set up Python
-      uses: actions/setup-python@v4
+    - name: 设置 Python 环境
+      uses: actions/setup-python@v5
       with:
-        python-version: '3.10'
+        python-version: '3.11'
     
-    - name: Install dependencies
+    - name: 安装依赖
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements.txt
+        pip install requests
     
-    - name: Sync LeetCode submissions
+    - name: 同步 LeetCode 提交
       env:
         LEETCODE_CN_SESSION: ${{ secrets.LEETCODE_CN_SESSION }}
         LEETCODE_CN_CSRF_TOKEN: ${{ secrets.LEETCODE_CN_CSRF_TOKEN }}
-        LEETCODE_SESSION: ${{ secrets.LEETCODE_SESSION }}
-        LEETCODE_CSRF_TOKEN: ${{ secrets.LEETCODE_CSRF_TOKEN }}
       run: |
         python sync.py
     
-    - name: Commit and push changes
+    - name: 提交更改
       run: |
         git config --local user.email "github-actions[bot]@users.noreply.github.com"
         git config --local user.name "github-actions[bot]"
         git add .
-        if git diff --staged --quiet; then
-          echo "No changes to commit"
-        else
-          git commit -m "Sync LeetCode submissions - $(date +'%Y-%m-%d %H:%M:%S')"
-          git push
-        fi
+        git diff --staged --quiet || git commit -m "🤖 自动同步 LeetCode 提交 $(date +'%Y-%m-%d %H:%M:%S')"
+    
+    - name: 推送到 GitHub
+      uses: ad-m/github-push-action@master
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        branch: ${{ github.ref }}
