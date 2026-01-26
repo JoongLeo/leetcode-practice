@@ -1,9 +1,9 @@
-name: Sync from leetcode.cn
+name: Sync LeetCode CN (Full Auto)
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "10 */3 * * *"
+    - cron: "10 */3 * * *"   # 每3小时一次（UTC）
 
 concurrency:
   group: leetcode-cn-sync
@@ -31,16 +31,20 @@ jobs:
           python -m pip install -U pip
           pip install requests
 
-      - name: Sync from leetcode.cn
+      - name: Sync from leetcode.cn (download + rename + move)
         env:
           LEETCODE_CN_CSRF_TOKEN: ${{ secrets.LEETCODE_CN_CSRF_TOKEN }}
           LEETCODE_CN_SESSION: ${{ secrets.LEETCODE_CN_SESSION }}
         run: |
           python tools/sync_leetcode_cn.py
 
+      - name: Update README (auto)
+        run: |
+          python tools/update_readme.py --sync-plan
+
       - name: Commit & push if changed
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
-          git diff --cached --quiet || (git commit -m "[LeetCode CN] sync" && git push)
+          git diff --cached --quiet || (git commit -m "[Auto] Sync LeetCode CN + Update README" && git push)
