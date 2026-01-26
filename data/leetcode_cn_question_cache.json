@@ -1,0 +1,34 @@
+{
+  "by_title": {
+    "得到 K 个黑块的最少涂色次数": {
+      "id": 2379,
+      "slug": "minimum-recolors-to-get-k-consecutive-black-blocks",
+      "title": "得到 K 个黑块的最少涂色次数"
+    },
+    "半径为 k 的子数组平均值": {
+      "id": 2090,
+      "slug": "k-radius-subarray-averages",
+      "title": "半径为 k 的子数组平均值"
+    },
+    "大小为 K 且平均值大于等于阈值的子数组数目": {
+      "id": 1343,
+      "slug": "number-of-sub-arrays-of-size-k-and-average-greater-than-or-equal-to-threshold",
+      "title": "大小为 K 且平均值大于等于阈值的子数组数目"
+    },
+    "子数组最大平均数 I": {
+      "id": 643,
+      "slug": "maximum-average-subarray-i",
+      "title": "子数组最大平均数 I"
+    },
+    "定长子串中元音的最大数目": {
+      "id": 1456,
+      "slug": "maximum-number-of-vowels-in-a-substring-of-given-length",
+      "title": "定长子串中元音的最大数目"
+    },
+    "最多 K 个重复元素的最长子数组": {
+      "id": 2958,
+      "slug": "length-of-longest-subarray-with-at-most-k-frequency",
+      "title": "最多 K 个重复元素的最长子数组"
+    }
+  }
+}
