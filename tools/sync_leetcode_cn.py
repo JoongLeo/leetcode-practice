@@ -46,18 +46,37 @@ def save_state(state: dict) -> None:
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
-def gql(session: requests.Session, query: str, variables: dict) -> dict:
+def gql(session: requests.Session, query: str, variables: dict, operation_name: str | None = None) -> dict:
+    payload = {"query": query, "variables": variables}
+    if operation_name:
+        payload["operationName"] = operation_name
+
     r = session.post(
         API,
-        headers={"User-Agent": UA, "Content-Type": "application/json"},
-        json={"query": query, "variables": variables},
+        headers={
+            # 这些是很多站点/WAF更“认可”的组合
+            "User-Agent": UA,
+            "Accept": "application/json, text/plain, */*",
+            "Content-Type": "application/json",
+            "Origin": "https://leetcode.cn",
+            "Referer": "https://leetcode.cn/",
+            "X-Requested-With": "XMLHttpRequest",
+        },
+        json=payload,
         timeout=30,
     )
-    r.raise_for_status()
+
+    # 关键：把 400 的响应正文打印出来（不包含你的 cookie）
+    if r.status_code != 200:
+        print("HTTP", r.status_code)
+        print(r.text[:1000])  # 只打印前 1000 字，够定位了
+        r.raise_for_status()
+
     data = r.json()
     if "errors" in data:
         raise RuntimeError(f"GraphQL errors: {data['errors']}")
     return data["data"]
+
 
 # 1) 拉最近的提交列表（这里用 submissionList；如果你后面发现 schema 不一致，
 #    用第 6 步的“抓包法”替换 query 即可）
@@ -111,7 +130,7 @@ def main():
 
     # 拉 0..N 页（先写保守点：最多扫 5 页 * 20 = 100 条）
     for page in range(5):
-        data = gql(s, Q_SUBMISSION_LIST, {"offset": page * 20, "limit": 20})
+        data = gql(s, Q_SUBMISSION_LIST, {"offset": page * 20, "limit": 20}, operation_name="submissionList")
         sublist = (data.get("submissionList") or {}).get("submissions") or []
         if not sublist:
             break
@@ -135,7 +154,7 @@ def main():
             lang = (sub.get("lang") or "").lower()
 
             # 拉代码
-            detail = gql(s, Q_SUBMISSION_DETAIL, {"submissionId": sid})
+            detail = gql(s, Q_SUBMISSION_DETAIL, {"submissionId": sid}, operation_name="submissionDetail")
             info = detail.get("submissionDetail") or {}
             code = info.get("code") or ""
             lang2 = (info.get("lang") or lang).lower()
