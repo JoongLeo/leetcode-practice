@@ -36,7 +36,12 @@ jobs:
           LEETCODE_CN_CSRF_TOKEN: ${{ secrets.LEETCODE_CN_CSRF_TOKEN }}
           LEETCODE_CN_SESSION: ${{ secrets.LEETCODE_CN_SESSION }}
         run: |
-          python tools/sync_leetcode_cn.py
+          python -u tools/sync_leetcode_cn.py
+          echo "==== git status after sync ===="
+          git status --porcelain
+          echo "==== recent files (top 50) ===="
+          find . -maxdepth 3 -type f \( -name "*.cpp" -o -name "*.py" \) | head -n 50
+
 
       - name: Update README (auto)
         run: |
