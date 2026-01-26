@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 from urllib.parse import quote
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 AUTO_START = "<!-- AUTO-GENERATED:START -->"
 AUTO_END = "<!-- AUTO-GENERATED:END -->"
@@ -127,11 +128,13 @@ def load_last_report(repo_root: Path) -> dict:
         return {}
 
 
-def _fmt_time(ts: int | None) -> str:
+def _fmt_time(ts: int | None, tz_name: str = "Asia/Shanghai") -> str:
     if not ts:
         return ""
-    dt = datetime.fromtimestamp(int(ts), tz=timezone.utc)
-    return dt.strftime("%Y-%m-%d %H:%M UTC")
+    tz = ZoneInfo(tz_name)
+    dt = datetime.fromtimestamp(int(ts), tz=tz)
+    # 显示成北京时间/台北时间
+    return dt.strftime("%Y-%m-%d %H:%M %Z")
 
 
 def render_recent_updates(repo_root: Path, max_items: int = 8) -> str:
