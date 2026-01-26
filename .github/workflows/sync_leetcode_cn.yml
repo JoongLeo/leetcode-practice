@@ -60,9 +60,40 @@ jobs:
           # 你现在已有的顶层分类目录（可继续加）
           if [ -d "滑动窗口与双指针" ]; then git add "滑动窗口与双指针"; fi
 
-          if ! git diff --cached --quiet; then
-            git commit -m "[Auto] Sync LeetCode CN + Update README"
-            git push
-          else
+          # 没有 staged 变化就退出
+          if git diff --cached --quiet; then
             echo "No changes to commit."
+            exit 0
           fi
+
+          # 从 data/last_sync_report.json 读取本次新增题号，生成更人性化的提交信息
+          IDS=$(python - <<'PY'
+import json, os
+p = "data/last_sync_report.json"
+if not os.path.exists(p):
+    print("")
+    raise SystemExit
+d = json.load(open(p, "r", encoding="utf-8"))
+
+# 兼容不同字段名（你用哪个都行）
+ids = d.get("new_problem_ids") or d.get("new_ids") or d.get("added_ids") or []
+
+# 统一为 int、去重、排序
+out = []
+try:
+    out = sorted({int(x) for x in ids})
+except Exception:
+    out = []
+
+print(",".join(map(str, out)))
+PY
+)
+
+          if [ -n "$IDS" ]; then
+            MSG="[Auto] LC ${IDS//,/\, }"
+          else
+            MSG="[Auto] Sync LeetCode CN + Update README"
+          fi
+
+          git commit -m "$MSG"
+          git push
