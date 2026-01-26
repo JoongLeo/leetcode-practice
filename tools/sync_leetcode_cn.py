@@ -1,184 +1,332 @@
-# tools/update_readme.py
+# tools/sync_leetcode_cn.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import argparse
+import json
 import os
+import random
 import re
+import time
 from pathlib import Path
-from urllib.parse import quote
+from typing import Any, Optional, Tuple
 
-AUTO_START = "<!-- AUTO-GENERATED:START -->"
-AUTO_END = "<!-- AUTO-GENERATED:END -->"
+import requests
 
-REPO_IGNORE_DIRS = {".git", ".vscode", ".idea", "__pycache__", "tools", "data"}
-CODE_SUFFIXES = {".cpp", ".py", ".java", ".js", ".ts", ".go", ".rs", ".c", ".cs", ".kt", ".swift", ".rb", ".php", ".txt"}
+API = "https://leetcode.cn/graphql/"
+UA = "leetcode-practice-bot/2.0"
 
-PID_RE = re.compile(r"^(\d+)\.\s*")
+# ====== 运行控制（防风控）======
+MAX_DETAIL_PER_RUN = 8
+SLEEP_BETWEEN_DETAIL = 1.2
+MAX_PAGES = 5  # submissionList 扫多少页（每页20）
+
+# ====== 状态文件（要提交到仓库）======
+STATE_PATH = Path("data/leetcode_cn_sync_state.json")
+
+# 语言到扩展名
+LANG2EXT = {
+    "cpp": "cpp",
+    "c++": "cpp",
+    "python": "py",
+    "python3": "py",
+    "java": "java",
+    "javascript": "js",
+    "typescript": "ts",
+    "go": "go",
+    "rust": "rs",
+    "c": "c",
+    "csharp": "cs",
+    "kotlin": "kt",
+    "swift": "swift",
+    "ruby": "rb",
+    "php": "php",
+}
+CPP_ALIASES = {"cpp", "c++"}
+
+# 首个非空行注释： // ...  或  # ...
+FIRST_LINE_COMMENT_RE = re.compile(r"^\s*(//|#)\s*(?P<text>.+?)\s*$")
 
 
-def natural_key(s: str):
-    parts = re.split(r"(\d+)", s)
-    return [int(p) if p.isdigit() else p.lower() for p in parts]
+class RateLimitError(RuntimeError):
+    pass
 
 
-def is_dir_ignorable(name: str) -> bool:
-    return name in REPO_IGNORE_DIRS or name.startswith(".")
+def slugify_filename(s: str) -> str:
+    # Windows / Linux 安全
+    s = re.sub(r"[\\/:*?\"<>|]", "_", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s[:140] if len(s) > 140 else s
 
 
-def find_repo_root(start: Path) -> Path:
-    cur = start.resolve()
-    for p in [cur, *cur.parents]:
-        if (p / ".git").exists():
-            return p
-    return start.resolve()
+def read_json(p: Path, default: Any) -> Any:
+    if not p.exists():
+        return default
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return default
 
 
-def read_text(p: Path) -> str:
-    return p.read_text(encoding="utf-8") if p.exists() else ""
-
-
-def write_text(p: Path, s: str) -> None:
+def write_json(p: Path, obj: Any) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(s, encoding="utf-8", newline="\n")
+    p.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def md_link(text: str, rel_posix_path: str) -> str:
-    return f"[{text}]({quote(rel_posix_path, safe='/-_.~')})"
+def load_state() -> dict:
+    return read_json(STATE_PATH, {"last_timestamp": 0})
 
 
-def replace_auto_section(original: str, new_section: str) -> str:
-    if AUTO_START in original and AUTO_END in original:
-        pre = original.split(AUTO_START)[0].rstrip()
-        post = original.split(AUTO_END)[1].lstrip()
-        return f"{pre}\n{AUTO_START}\n{new_section.rstrip()}\n{AUTO_END}\n{post}".rstrip() + "\n"
-    base = original.rstrip()
-    if base:
-        base += "\n\n"
-    return f"{base}{AUTO_START}\n{new_section.rstrip()}\n{AUTO_END}\n"
+def save_state(state: dict) -> None:
+    write_json(STATE_PATH, state)
 
 
-def ensure_header(existing: str, header: str) -> str:
-    return existing if existing.strip() else header
+def gql(session: requests.Session, query: str, variables: dict, operation_name: str | None = None) -> dict:
+    payload = {"query": query, "variables": variables}
+    if operation_name:
+        payload["operationName"] = operation_name
 
+    headers = {
+        "User-Agent": UA,
+        "Accept": "application/json, text/plain, */*",
+        "Content-Type": "application/json",
+        "Origin": "https://leetcode.cn",
+        "Referer": "https://leetcode.cn/",
+        "X-Requested-With": "XMLHttpRequest",
+    }
 
-def list_dirs(folder: Path) -> list[Path]:
-    ds = [p for p in folder.iterdir() if p.is_dir() and not is_dir_ignorable(p.name)]
-    ds.sort(key=lambda x: natural_key(x.name))
-    return ds
+    for attempt in range(5):
+        r = session.post(API, headers=headers, json=payload, timeout=30)
 
+        try:
+            data = r.json()
+        except Exception:
+            print("HTTP", r.status_code)
+            print(r.text[:1000])
+            r.raise_for_status()
+            raise RuntimeError("Bad non-json response")
 
-def list_code_files(folder: Path) -> list[Path]:
-    fs = [p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in CODE_SUFFIXES and p.name != "README.md"]
-    fs.sort(key=lambda x: natural_key(x.name))
-    return fs
-
-
-def count_all_code_files(folder: Path) -> int:
-    c = 0
-    for p in folder.rglob("*"):
-        if p.is_file() and p.suffix.lower() in CODE_SUFFIXES and p.name != "README.md":
-            rel = p.relative_to(folder).parts
-            if rel and rel[0] in REPO_IGNORE_DIRS:
+        if "errors" in data:
+            msg = str(data["errors"])
+            if "超出访问限制" in msg:
+                sleep_s = (2**attempt) + random.random()
+                print(f"⚠️ Rate limited. backoff {sleep_s:.2f}s (attempt {attempt+1}/5)")
+                time.sleep(sleep_s)
                 continue
-            c += 1
-    return c
+            raise RuntimeError(f"GraphQL errors: {data['errors']}")
+
+        if r.status_code != 200:
+            print("HTTP", r.status_code)
+            print(r.text[:1000])
+            r.raise_for_status()
+
+        if "data" not in data:
+            raise RuntimeError(f"Bad response: {data}")
+
+        return data["data"]
+
+    raise RateLimitError("Rate limit persists after retries")
 
 
-def collect_problem_ids(repo_root: Path) -> set[int]:
-    ids = set()
-    for p in repo_root.rglob("*"):
-        if not p.is_file():
+Q_SUBMISSION_LIST = r"""
+query submissionList($offset: Int!, $limit: Int!) {
+  submissionList(offset: $offset, limit: $limit) {
+    submissions {
+      id
+      title
+      statusDisplay
+      lang
+      timestamp
+    }
+  }
+}
+"""
+
+Q_SUBMISSION_DETAIL = r"""
+query submissionDetail($submissionId: ID!) {
+  submissionDetail(submissionId: $submissionId) {
+    code
+    lang
+  }
+}
+"""
+
+
+def code_ext_from_lang(lang: str) -> str:
+    lang = (lang or "").lower().strip()
+    return LANG2EXT.get(lang, "txt")
+
+
+def extract_path_from_code(code: str) -> Optional[str]:
+    """
+    取“首个非空行”，要求是 //... 或 #...
+    返回注释正文（不含 ///#），否则 None
+    """
+    if not code:
+        return None
+    for line in code.splitlines():
+        if line.strip() == "":
             continue
-        if p.suffix.lower() not in CODE_SUFFIXES:
-            continue
-        if p.name == "README.md":
-            continue
-        rel = p.relative_to(repo_root).parts
-        if rel and rel[0] in REPO_IGNORE_DIRS:
-            continue
-        m = PID_RE.match(p.name)
-        if m:
-            try:
-                ids.add(int(m.group(1)))
-            except Exception:
-                pass
-    return ids
+        m = FIRST_LINE_COMMENT_RE.match(line)
+        if not m:
+            return None
+        return (m.group("text") or "").strip()
+    return None
 
 
-def render_root_auto(repo_root: Path) -> str:
-    total_files = count_all_code_files(repo_root)
-    ids = collect_problem_ids(repo_root)
-
-    lines = []
-    lines.append("## 统计")
-    lines.append(f"- 已归档代码文件：**{total_files}**")
-    lines.append(f"- 识别到题号（文件名以 `1234.` 开头）：**{len(ids)}**")
-    lines.append("")
-    lines.append("## 目录导航")
-    dirs = list_dirs(repo_root)
-    if not dirs:
-        lines.append("_（暂无内容）_")
-    else:
-        for d in dirs:
-            rel = d.relative_to(repo_root).as_posix() + "/"
-            cnt = count_all_code_files(d)
-            lines.append(f"- {md_link(f'{d.name}（{cnt}）', rel)}")
-
-    lines.append("")
-    lines.append("```bash")
-    lines.append("python tools/update_readme.py")
-    lines.append("```")
-    return "\n".join(lines)
+def split_path(comment_text: str) -> list[str]:
+    # 用 '-' 分隔层级；过滤空片段
+    parts = [p.strip() for p in (comment_text or "").split("-")]
+    return [p for p in parts if p]
 
 
-def render_folder_auto(folder: Path) -> str:
-    subs = list_dirs(folder)
-    files = list_code_files(folder)
+def ensure_extension(filename: str, lang: str) -> str:
+    # 如果用户已经写了扩展名，就尊重；否则按语言补
+    if "." in Path(filename).name:
+        return filename
+    ext = code_ext_from_lang(lang)
+    if (lang or "").lower().strip() in CPP_ALIASES:
+        ext = "cpp"
+    return f"{filename}.{ext}"
 
-    lines = []
-    if subs:
-        lines.append("## 子目录")
-        for sd in subs:
-            rel = sd.relative_to(folder).as_posix() + "/"
-            cnt = count_all_code_files(sd)
-            lines.append(f"- {md_link(f'{sd.name}（{cnt}）', rel)}")
-        lines.append("")
 
-    if files:
-        lines.append("## 题目索引")
-        for f in files:
-            rel = f.relative_to(folder).as_posix()
-            lines.append(f"- {md_link(f.stem, rel)}")
-        lines.append("")
-
-    if not subs and not files:
-        lines.append("_（空目录）_")
-
-    return "\n".join(lines).rstrip() + "\n"
+def bootstrap_watermark(session: requests.Session) -> int:
+    """
+    用“当前最新一页提交的最大 timestamp”作为水位线，避免首次把历史无注释提交全扫进来。
+    """
+    data = gql(session, Q_SUBMISSION_LIST, {"offset": 0, "limit": 20}, operation_name="submissionList")
+    sublist = (data.get("submissionList") or {}).get("submissions") or []
+    mx = 0
+    for sub in sublist:
+        try:
+            mx = max(mx, int(sub.get("timestamp", 0)))
+        except Exception:
+            pass
+    return mx
 
 
 def main():
-    script_dir = Path(__file__).resolve().parent
-    repo_root = find_repo_root(script_dir)
-    os.chdir(repo_root)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--init", action="store_true", help="Initialize watermark to latest submissions and exit.")
+    ap.add_argument("--verbose", action="store_true", help="Print more logs.")
+    args = ap.parse_args()
 
-    # root README
-    root_path = repo_root / "README.md"
-    root_existing = ensure_header(read_text(root_path), "# leetcode-practice\n\n")
-    root_new = replace_auto_section(root_existing, render_root_auto(repo_root))
-    write_text(root_path, root_new)
+    csrf = os.environ.get("LEETCODE_CN_CSRF_TOKEN", "").strip()
+    sess = os.environ.get("LEETCODE_CN_SESSION", "").strip()
+    if not csrf or not sess:
+        raise SystemExit("Missing env: LEETCODE_CN_CSRF_TOKEN / LEETCODE_CN_SESSION")
 
-    # all folder readmes
-    for folder in [p for p in repo_root.rglob("*") if p.is_dir()]:
-        rel = folder.relative_to(repo_root).parts
-        if rel and rel[0] in REPO_IGNORE_DIRS:
-            continue
-        readme = folder / "README.md"
-        existing = ensure_header(read_text(readme), f"# {folder.name}\n\n")
-        new = replace_auto_section(existing, render_folder_auto(folder))
-        write_text(readme, new)
+    s = requests.Session()
+    s.headers.update({"User-Agent": UA, "Referer": "https://leetcode.cn/", "x-csrftoken": csrf})
+    s.cookies.set("csrftoken", csrf, domain="leetcode.cn")
+    s.cookies.set("LEETCODE_SESSION", sess, domain="leetcode.cn")
 
-    print("✅ updated README(s)")
+    state = load_state()
+
+    # 首次没有 state：默认 bootstrap（避免历史无注释污染）
+    if not STATE_PATH.exists():
+        wm = bootstrap_watermark(s)
+        save_state({"last_timestamp": wm})
+        print(f"🧱 init state (auto bootstrap). last_timestamp={wm}")
+        return
+
+    if args.init:
+        wm = bootstrap_watermark(s)
+        save_state({"last_timestamp": wm})
+        print(f"🧱 init state. last_timestamp={wm}")
+        return
+
+    last_ts = int(state.get("last_timestamp", 0))
+    new_last_ts = last_ts
+
+    wrote = 0
+    skipped_no_comment = 0
+    skipped_bad_path = 0
+    pulled_details = 0
+
+    for page in range(MAX_PAGES):
+        data = gql(s, Q_SUBMISSION_LIST, {"offset": page * 20, "limit": 20}, operation_name="submissionList")
+        sublist = (data.get("submissionList") or {}).get("submissions") or []
+        if not sublist:
+            break
+
+        for sub in sublist:
+            try:
+                ts = int(sub.get("timestamp", 0))
+            except Exception:
+                continue
+
+            if ts <= last_ts:
+                continue  # 老的
+
+            new_last_ts = max(new_last_ts, ts)
+
+            if sub.get("statusDisplay") != "Accepted":
+                continue
+
+            if pulled_details >= MAX_DETAIL_PER_RUN:
+                state["last_timestamp"] = new_last_ts
+                save_state(state)
+                print(f"ℹ️ Reach MAX_DETAIL_PER_RUN={MAX_DETAIL_PER_RUN}, stop early. wrote={wrote}, skip_no_comment={skipped_no_comment}, last_timestamp={new_last_ts}")
+                return
+
+            sid = str(sub.get("id"))
+            lang_list = (sub.get("lang") or "").lower().strip()
+
+            time.sleep(SLEEP_BETWEEN_DETAIL + random.random() * 0.6)
+
+            try:
+                detail = gql(s, Q_SUBMISSION_DETAIL, {"submissionId": sid}, operation_name="submissionDetail")
+            except RateLimitError:
+                state["last_timestamp"] = new_last_ts
+                save_state(state)
+                print("⚠️ Hit rate limit. Saved state and exit gracefully.")
+                print(f"✅ wrote={wrote}, skip_no_comment={skipped_no_comment}, last_timestamp={new_last_ts}")
+                return
+
+            pulled_details += 1
+            info = detail.get("submissionDetail") or {}
+            code = info.get("code") or ""
+            lang_detail = (info.get("lang") or lang_list).lower().strip()
+
+            comment_text = extract_path_from_code(code)
+            if not comment_text:
+                skipped_no_comment += 1
+                if args.verbose:
+                    title = (sub.get("title") or "").strip()
+                    print(f"⏭️ skip(no path comment): {title} sid={sid} ts={ts}")
+                continue
+
+            parts = split_path(comment_text)
+            if len(parts) < 2:
+                skipped_bad_path += 1
+                if args.verbose:
+                    print(f"⏭️ skip(bad path): '{comment_text}' sid={sid}")
+                continue
+
+            dir_parts = [slugify_filename(p) for p in parts[:-1]]
+            file_part = slugify_filename(parts[-1])
+            file_part = ensure_extension(file_part, lang_detail)
+
+            out_dir = Path(*dir_parts)
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            out_path = out_dir / file_part
+            if out_path.exists():
+                continue
+
+            out_path.write_text(code, encoding="utf-8", newline="\n")
+            wrote += 1
+            if args.verbose:
+                print(f"✅ wrote: {out_path.as_posix()}")
+
+        time.sleep(0.2 + random.random() * 0.2)
+
+    if new_last_ts != last_ts:
+        state["last_timestamp"] = new_last_ts
+        save_state(state)
+
+    print(f"✅ wrote={wrote}, skip_no_comment={skipped_no_comment}, skip_bad_path={skipped_bad_path}, last_timestamp={state.get('last_timestamp', last_ts)}")
 
 
 if __name__ == "__main__":

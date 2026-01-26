@@ -10,14 +10,10 @@ from urllib.parse import quote
 AUTO_START = "<!-- AUTO-GENERATED:START -->"
 AUTO_END = "<!-- AUTO-GENERATED:END -->"
 
-# 关键：必须包含 .github，避免 GitHub Actions 推送被拒（workflows 安全限制）
 REPO_IGNORE_DIRS = {".git", ".github", ".vscode", ".idea", "__pycache__", "tools", "data"}
+CODE_SUFFIXES = {".cpp", ".py", ".java", ".js", ".ts", ".go", ".rs", ".c", ".cs", ".kt", ".swift", ".rb", ".php", ".txt"}
 
-CODE_SUFFIXES = {
-    ".cpp", ".py", ".java", ".js", ".ts", ".go", ".rs", ".c", ".cs", ".kt", ".swift", ".rb", ".php", ".txt"
-}
-
-PID_RE = re.compile(r"^(\d+)\.\s*")
+SOLVED_ID_RE = re.compile(r"^(\d+)\.\s*")
 
 
 def natural_key(s: str):
@@ -72,110 +68,62 @@ def list_dirs(folder: Path) -> list[Path]:
 
 
 def list_code_files(folder: Path) -> list[Path]:
-    fs = [p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in CODE_SUFFIXES and p.name != "README.md"]
+    fs = [p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in CODE_SUFFIXES]
+    fs = [p for p in fs if p.name != "README.md"]
     fs.sort(key=lambda x: natural_key(x.name))
     return fs
 
 
-def iter_dirs_skip_ignored(root: Path):
-    """
-    手动 walk + 剪枝：不会进入 .github / tools / data 等子树
-    """
-    stack = [root]
-    while stack:
-        cur = stack.pop()
-        for d in cur.iterdir():
-            if not d.is_dir():
+def count_all_code_files(folder: Path) -> int:
+    c = 0
+    for p in folder.rglob("*"):
+        if p.is_file() and p.suffix.lower() in CODE_SUFFIXES and p.name != "README.md":
+            rel = p.relative_to(folder).parts
+            if rel and rel[0] in REPO_IGNORE_DIRS:
                 continue
-            name = d.name
-            if is_dir_ignorable(name):
-                continue
-            yield d
-            stack.append(d)
+            c += 1
+    return c
 
 
-def iter_files_skip_ignored(root: Path):
-    """
-    手动 walk files + 剪枝：不会进入 .github / tools / data 等子树
-    """
-    stack = [root]
-    while stack:
-        cur = stack.pop()
-        for p in cur.iterdir():
-            if p.is_dir():
-                if is_dir_ignorable(p.name):
-                    continue
-                stack.append(p)
-            elif p.is_file():
-                yield p
-
-
-def count_all_code_files(repo_root: Path, folder: Path) -> int:
-    """
-    统计 folder 子树下的代码文件数，且剪枝忽略目录。
-    """
-    # 若 folder 本身就是忽略目录，直接 0
-    if folder.name in REPO_IGNORE_DIRS or folder.name.startswith("."):
-        return 0
-
-    cnt = 0
-    # 从 folder 开始 walk（剪枝）
-    stack = [folder]
-    while stack:
-        cur = stack.pop()
-        for p in cur.iterdir():
-            if p.is_dir():
-                if is_dir_ignorable(p.name):
-                    continue
-                stack.append(p)
-            elif p.is_file():
-                if p.name == "README.md":
-                    continue
-                if p.suffix.lower() in CODE_SUFFIXES:
-                    cnt += 1
-    return cnt
-
-
-def collect_problem_ids(repo_root: Path) -> set[int]:
-    """
-    收集仓库中所有题号（文件名以 '1234.' 开头），剪枝忽略目录。
-    """
-    ids = set()
-    for p in iter_files_skip_ignored(repo_root):
-        if p.name == "README.md":
+def collect_solved_ids(repo_root: Path) -> set[int]:
+    solved = set()
+    for p in repo_root.rglob("*"):
+        if not p.is_file():
             continue
         if p.suffix.lower() not in CODE_SUFFIXES:
             continue
-        m = PID_RE.match(p.name)
+        if p.name == "README.md":
+            continue
+        rel = p.relative_to(repo_root).parts
+        if rel and rel[0] in REPO_IGNORE_DIRS:
+            continue
+        m = SOLVED_ID_RE.match(p.name)
         if m:
             try:
-                ids.add(int(m.group(1)))
+                solved.add(int(m.group(1)))
             except Exception:
                 pass
-    return ids
+    return solved
 
 
 def render_root_auto(repo_root: Path) -> str:
-    # 统计：全仓库代码文件数 & 题号数（剪枝）
-    total_files = 0
-    for d in list_dirs(repo_root):
-        total_files += count_all_code_files(repo_root, d)
-
-    ids = collect_problem_ids(repo_root)
+    total_files = count_all_code_files(repo_root)
+    solved = collect_solved_ids(repo_root)
 
     lines = []
     lines.append("## 统计")
     lines.append(f"- 已归档代码文件：**{total_files}**")
-    lines.append(f"- 识别到题号（文件名以 `1234.` 开头）：**{len(ids)}**")
+    lines.append(f"- 识别到题号（文件名以 `1234.` 开头）：**{len(solved)}**")
     lines.append("")
     lines.append("## 目录导航")
+
     dirs = list_dirs(repo_root)
     if not dirs:
         lines.append("_（暂无内容）_")
     else:
         for d in dirs:
             rel = d.relative_to(repo_root).as_posix() + "/"
-            cnt = count_all_code_files(repo_root, d)
+            cnt = count_all_code_files(d)
             lines.append(f"- {md_link(f'{d.name}（{cnt}）', rel)}")
 
     lines.append("")
@@ -185,7 +133,7 @@ def render_root_auto(repo_root: Path) -> str:
     return "\n".join(lines)
 
 
-def render_folder_readme(folder: Path, repo_root: Path) -> str:
+def render_folder_readme(folder: Path) -> str:
     subs = list_dirs(folder)
     files = list_code_files(folder)
 
@@ -194,7 +142,7 @@ def render_folder_readme(folder: Path, repo_root: Path) -> str:
         lines.append("## 子目录")
         for sd in subs:
             rel = sd.relative_to(folder).as_posix() + "/"
-            cnt = count_all_code_files(repo_root, sd)
+            cnt = count_all_code_files(sd)
             lines.append(f"- {md_link(f'{sd.name}（{cnt}）', rel)}")
         lines.append("")
 
@@ -222,12 +170,21 @@ def main():
     root_new = replace_auto_section(root_existing, render_root_auto(repo_root))
     write_text(root_path, root_new)
 
-    # 只对“非忽略目录树”生成 README
-    for folder in iter_dirs_skip_ignored(repo_root):
-        readme = folder / "README.md"
-        existing = ensure_header(read_text(readme), f"# {folder.name}\n\n")
-        new = replace_auto_section(existing, render_folder_readme(folder, repo_root))
-        write_text(readme, new)
+    # 手动 walk，跳过 ignored 树
+    stack = [repo_root]
+    while stack:
+        cur = stack.pop()
+        for d in cur.iterdir():
+            if not d.is_dir():
+                continue
+            if is_dir_ignorable(d.name):
+                continue
+            stack.append(d)
+
+            readme = d / "README.md"
+            existing = ensure_header(read_text(readme), f"# {d.name}\n\n")
+            new = replace_auto_section(existing, render_folder_readme(d))
+            write_text(readme, new)
 
     print("✅ updated README(s)")
 
