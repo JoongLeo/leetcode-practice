@@ -43,7 +43,7 @@ jobs:
         run: |
           python tools/update_readme.py
 
-      - name: Commit & push if changed
+      - name: Commit & push if changed (show problem IDs)
         run: |
           set -e
           git config user.name "github-actions[bot]"
@@ -65,22 +65,21 @@ jobs:
             exit 0
           fi
 
-          # 从 data/last_sync_report.json 读取本次新增题号，生成更人性化的提交信息
-          IDS=$(python - <<'PY'
-          import json, os
-          p = "data/last_sync_report.json"
-          if not os.path.exists(p):
-              print("")
-              raise SystemExit
-          d = json.load(open(p, "r", encoding="utf-8"))
-          ids = d.get("new_problem_ids") or d.get("new_ids") or d.get("added_ids") or []
-          try:
-              out = sorted({int(x) for x in ids})
-          except Exception:
-              out = []
-          print(",".join(map(str, out)))
+          # 从本次 staged 文件名中提取题号（最稳，不依赖 report）
+          IDS=$(git diff --cached --name-only --diff-filter=AM \
+            | python - <<'PY'
+          import re, sys
+          ids=set()
+          pat=re.compile(r'(^|/)(\d+)\.\s*')   # 文件名以 "1234." 开头
+          for line in sys.stdin:
+              line=line.strip().replace("\\","/")
+              m=pat.search(line)
+              if m:
+                  ids.add(int(m.group(2)))
+          out=sorted(ids)
+          print(",".join(map(str,out)))
           PY
-          )
+                    )
 
           if [ -n "$IDS" ]; then
             MSG="[Auto] LC ${IDS//,/, }"
