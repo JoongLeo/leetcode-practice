@@ -2,50 +2,29 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-import json
 import os
-import random
 import re
+import json
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-API = "https://leetcode.cn/graphql/"
-UA = "leetcode-practice-bot/1.0"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DATA_DIR = REPO_ROOT / "data"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-# ====== 运行控制：避免触发风控 ======
-MAX_DETAIL_PER_RUN = 8
-SLEEP_BETWEEN_DETAIL = 1.2
-MAX_PAGES = 6  # submissionList 扫多少页（每页 20）
+STATE_PATH = DATA_DIR / "leetcode_cn_sync_state.json"
+LAST_REPORT_PATH = DATA_DIR / "last_sync_report.json"
 
-# ====== 输出与状态 ======
-STATE_PATH = Path("data/leetcode_cn_sync_state.json")
+# 一次最多抓多少个 submission detail（避免太慢/风控）
+MAX_DETAIL_PER_RUN = int(os.getenv("MAX_DETAIL_PER_RUN", "8"))
 
-# ====== 语言到扩展名 ======
-LANG2EXT = {
-    "cpp": "cpp",
-    "c++": "cpp",
-    "python": "py",
-    "python3": "py",
-    "java": "java",
-    "javascript": "js",
-    "typescript": "ts",
-    "go": "go",
-    "rust": "rs",
-    "c": "c",
-    "csharp": "cs",
-    "kotlin": "kt",
-    "swift": "swift",
-    "ruby": "rb",
-    "php": "php",
-}
-CPP_ALIASES = {"cpp", "c++"}
-
-
-class RateLimitError(RuntimeError):
-    pass
+# 你的首行注释规范：
+# // 一级-二级-2841. 题名.cpp
+HEADER_RE = re.compile(r"^\s*//\s*(.+?)\s*$")
+FILENAME_TAIL_RE = re.compile(r"^\s*(\d+)\.\s*(.+?)\.(cpp|py|java|js|ts|go|rs|c|cs|kt|swift|rb|php|txt)\s*$", re.IGNORECASE)
 
 
 def read_json(p: Path, default: Any) -> Any:
@@ -62,268 +41,249 @@ def write_json(p: Path, obj: Any) -> None:
     p.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def load_state() -> dict:
-    # last_timestamp: 上次同步到的提交时间戳（秒）
-    return read_json(STATE_PATH, {"last_timestamp": 0})
-
-
-def save_state(state: dict) -> None:
-    write_json(STATE_PATH, state)
-
-
-def gql(session: requests.Session, query: str, variables: dict, operation_name: str | None = None) -> dict:
-    payload = {"query": query, "variables": variables}
-    if operation_name:
-        payload["operationName"] = operation_name
-
-    headers = {
-        "User-Agent": UA,
-        "Accept": "application/json, text/plain, */*",
-        "Content-Type": "application/json",
-        "Origin": "https://leetcode.cn",
-        "Referer": "https://leetcode.cn/",
-        "X-Requested-With": "XMLHttpRequest",
-    }
-
-    for attempt in range(5):
-        r = session.post(API, headers=headers, json=payload, timeout=30)
-        try:
-            data = r.json()
-        except Exception:
-            print("HTTP", r.status_code)
-            print(r.text[:1000])
-            r.raise_for_status()
-            raise RuntimeError("Bad non-json response")
-
-        if "errors" in data:
-            msg = str(data["errors"])
-            if "超出访问限制" in msg:
-                sleep_s = (2 ** attempt) + random.random()
-                print(f"⚠️ Rate limited. backoff {sleep_s:.2f}s (attempt {attempt+1}/5)")
-                time.sleep(sleep_s)
-                continue
-            raise RuntimeError(f"GraphQL errors: {data['errors']}")
-
-        if r.status_code != 200:
-            print("HTTP", r.status_code)
-            print(r.text[:1000])
-            r.raise_for_status()
-
-        if "data" not in data:
-            raise RuntimeError(f"Bad response: {data}")
-
-        return data["data"]
-
-    raise RateLimitError("Rate limit persists after retries")
-
-
-# ====== 1) 提交列表 ======
-Q_SUBMISSION_LIST = r"""
-query submissionList($offset: Int!, $limit: Int!) {
-  submissionList(offset: $offset, limit: $limit) {
-    submissions {
-      id
-      title
-      statusDisplay
-      lang
-      timestamp
-    }
-  }
-}
-"""
-
-# ====== 2) 提交详情（代码） ======
-Q_SUBMISSION_DETAIL = r"""
-query submissionDetail($submissionId: ID!) {
-  submissionDetail(submissionId: $submissionId) {
-    code
-    lang
-  }
-}
-"""
-
-# ====== 你的首行注释规范 ======
-# 支持：
-#   // 一级-二级-2841. xxx.cpp
-#   #  一级-二级-2841. xxx.py
-# 允许二级再细分（比如 三级），只要用 "-" 分隔即可：一级-二级-三级-题号.题名.ext
-HEADER_RE = re.compile(
-    r"^\s*(?P<comment>//|#)\s*(?P<body>.+?)\s*$"
-)
-# body 里最后一段必须含题号： 2841. xxx
-PROB_RE = re.compile(r"(?P<pid>\d+)\.\s*(?P<title>.+)$")
-
-
-def normalize_seg(s: str) -> str:
-    # 清理路径非法字符 + 去空白
+def safe_name(s: str) -> str:
+    # Windows/跨平台安全：去掉路径分隔/非法字符
     s = s.strip()
-    s = re.sub(r"[\\/:*?\"<>|]", "_", s)
+    s = s.replace("/", "／").replace("\\", "＼")
+    s = re.sub(r'[<>:"|?*]', "，", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
 
-def code_ext_from_lang(lang: str) -> str:
-    lang = (lang or "").lower().strip()
-    return LANG2EXT.get(lang, "txt")
+def get_session() -> requests.Session:
+    csrf = os.getenv("LEETCODE_CN_CSRF_TOKEN", "").strip()
+    sess = os.getenv("LEETCODE_CN_SESSION", "").strip()
+    if not csrf or not sess:
+        raise RuntimeError("Missing env: LEETCODE_CN_CSRF_TOKEN / LEETCODE_CN_SESSION")
+
+    s = requests.Session()
+    # leetcode.cn 常见 cookie 名称
+    s.cookies.set("csrftoken", csrf, domain="leetcode.cn")
+    s.cookies.set("LEETCODE_SESSION", sess, domain="leetcode.cn")
+    s.headers.update({
+        "User-Agent": "Mozilla/5.0",
+        "Referer": "https://leetcode.cn/",
+        "Origin": "https://leetcode.cn",
+        "X-CSRFToken": csrf,
+    })
+    return s
 
 
-def parse_header_classification(code: str) -> Optional[Tuple[list[str], int, str, str]]:
-    """
-    从代码首行注释解析分类与题目信息。
-    返回: (levels, pid, title, ext_hint)
-      - levels: 目录层级列表（>=2 推荐，但你想要 2 层即可）
-      - pid/title: 题号/题名（用于文件名）
-      - ext_hint: 注释里若写了 .cpp/.py 等，用它优先；否则用提交语言映射
-    """
-    if not code:
+def fetch_recent_submissions(sess: requests.Session, offset: int = 0, limit: int = 20) -> Dict[str, Any]:
+    # 这个接口在 leetcode.cn 账号登录态下可用
+    url = f"https://leetcode.cn/api/submissions/?offset={offset}&limit={limit}"
+    r = sess.get(url, timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+
+def try_fetch_submission_code_graphql(sess: requests.Session, submission_id: int) -> Optional[str]:
+    # GraphQL（更稳），如果被限制会返回 None
+    url = "https://leetcode.cn/graphql/"
+    payload = {
+        "operationName": "submissionDetail",
+        "variables": {"submissionId": submission_id},
+        "query": """
+query submissionDetail($submissionId: Int!) {
+  submissionDetail(submissionId: $submissionId) {
+    code
+  }
+}
+""".strip()
+    }
+    try:
+        r = sess.post(url, json=payload, timeout=30)
+        if r.status_code != 200:
+            return None
+        js = r.json()
+        code = (((js.get("data") or {}).get("submissionDetail") or {}).get("code"))
+        return code if isinstance(code, str) and code.strip() else None
+    except Exception:
         return None
+
+
+def try_fetch_submission_code_html(sess: requests.Session, submission_id: int) -> Optional[str]:
+    # 兜底：抓 detail 页面，从 HTML 里提取 code（可能会随站点更新变化）
+    url = f"https://leetcode.cn/submissions/detail/{submission_id}/"
+    try:
+        r = sess.get(url, timeout=30)
+        if r.status_code != 200:
+            return None
+        text = r.text
+
+        # 常见：页面里会有 "code":"...." 的 JSON 字段
+        m = re.search(r'"code"\s*:\s*"((?:\\.|[^"\\])*)"', text)
+        if not m:
+            return None
+        raw = m.group(1)
+        code = bytes(raw, "utf-8").decode("unicode_escape")
+        code = code.replace("\\n", "\n").replace("\\t", "\t").replace('\\"', '"').replace("\\\\", "\\")
+        return code.strip() if code.strip() else None
+    except Exception:
+        return None
+
+
+def fetch_submission_code(sess: requests.Session, submission_id: int) -> Optional[str]:
+    code = try_fetch_submission_code_graphql(sess, submission_id)
+    if code:
+        return code
+    return try_fetch_submission_code_html(sess, submission_id)
+
+
+def parse_header_path(code: str) -> Optional[Tuple[List[str], int, str, str]]:
+    """
+    从首行注释解析：
+    - folders: [一级, 二级, ...]（至少 1 级；通常 2 级）
+    - pid: 题号
+    - title: 题名（来自注释尾段）
+    - ext: cpp/py/...
+    """
     first_line = code.splitlines()[0] if code.splitlines() else ""
     m = HEADER_RE.match(first_line)
     if not m:
         return None
-
-    body = m.group("body").strip()
-
-    # 你用 "-" 分割层级
-    parts = [p.strip() for p in body.split("-") if p.strip()]
-    if len(parts) < 3:
-        # 至少：一级-二级-题号.题名...
+    header = m.group(1).strip()
+    parts = [safe_name(p) for p in header.split("-") if p.strip()]
+    if len(parts) < 2:
         return None
 
     tail = parts[-1]
-    ext_hint = ""
-    # tail 可能是 "2841. xxx.cpp" 或 "2841. xxx"
-    if "." in tail:
-        # 如果最后有扩展名，切出来
-        # 只在末尾像 ".cpp" 这种情况生效
-        ext_m = re.search(r"\.(cpp|py|java|js|ts|go|rs|c|cs|kt|swift|rb|php|txt)\s*$", tail, re.IGNORECASE)
-        if ext_m:
-            ext_hint = ext_m.group(1).lower()
-            tail_wo_ext = re.sub(r"\.(cpp|py|java|js|ts|go|rs|c|cs|kt|swift|rb|php|txt)\s*$", "", tail, flags=re.IGNORECASE)
-        else:
-            tail_wo_ext = tail
-    else:
-        tail_wo_ext = tail
-
-    pm = PROB_RE.search(tail_wo_ext)
-    if not pm:
+    mt = FILENAME_TAIL_RE.match(tail)
+    if not mt:
         return None
 
-    pid = int(pm.group("pid"))
-    title = pm.group("title").strip()
+    pid = int(mt.group(1))
+    title = safe_name(mt.group(2))
+    ext = mt.group(3).lower()
 
-    levels = [normalize_seg(x) for x in parts[:-1]]  # 目录层级
-    levels = [x for x in levels if x]
-    if len(levels) < 1:
+    folders = [safe_name(x) for x in parts[:-1] if x.strip()]
+    if not folders:
         return None
 
-    return levels, pid, title, ext_hint
+    return folders, pid, title, ext
 
 
-def build_target_path(levels: list[str], pid: int, title: str, ext: str) -> Path:
-    # 你目前想要：一级/二级/ 题号. 题名.ext
-    # 如果 levels 超过 2，就按顺序更深层目录
-    folder = Path(*levels)
-    fname = normalize_seg(f"{pid}. {title}") if title else f"{pid}. unknown"
-    return folder / f"{fname}.{ext}"
+def write_solution_file(folders: List[str], pid: int, title: str, ext: str, code: str) -> Path:
+    out_dir = REPO_ROOT
+    for f in folders:
+        out_dir = out_dir / f
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    filename = f"{pid}. {title}.{ext}"
+    out_path = out_dir / filename
+
+    # 若存在且内容相同就不写
+    if out_path.exists():
+        old = out_path.read_text(encoding="utf-8", errors="ignore")
+        if old == code:
+            return out_path
+
+    out_path.write_text(code.rstrip() + "\n", encoding="utf-8", newline="\n")
+    return out_path
 
 
 def main():
-    csrf = os.environ.get("LEETCODE_CN_CSRF_TOKEN", "").strip()
-    sess = os.environ.get("LEETCODE_CN_SESSION", "").strip()
-    if not csrf or not sess:
-        raise SystemExit("Missing env: LEETCODE_CN_CSRF_TOKEN / LEETCODE_CN_SESSION")
+    sess = get_session()
 
-    state = load_state()
-    last_ts = int(state.get("last_timestamp", 0))
-
-    s = requests.Session()
-    s.headers.update({"User-Agent": UA, "Referer": "https://leetcode.cn/", "x-csrftoken": csrf})
-    s.cookies.set("csrftoken", csrf, domain="leetcode.cn")
-    s.cookies.set("LEETCODE_SESSION", sess, domain="leetcode.cn")
+    state = read_json(STATE_PATH, default={"last_timestamp": 0, "seen_ids": []})
+    last_timestamp = int(state.get("last_timestamp", 0) or 0)
+    seen_ids = set(int(x) for x in (state.get("seen_ids") or []) if str(x).isdigit())
 
     wrote = 0
-    pulled = 0
     skip_no_comment = 0
-    new_last_ts = last_ts
+    scanned = 0
+    max_seen_ts = last_timestamp
 
-    for page in range(MAX_PAGES):
-        data = gql(s, Q_SUBMISSION_LIST, {"offset": page * 20, "limit": 20}, operation_name="submissionList")
-        sublist = (data.get("submissionList") or {}).get("submissions") or []
-        if not sublist:
+    added_items: List[Dict[str, Any]] = []
+
+    # 拉最新提交列表（多翻几页，直到遇到 <= last_timestamp）
+    offset = 0
+    stop = False
+
+    while not stop and wrote < MAX_DETAIL_PER_RUN:
+        js = fetch_recent_submissions(sess, offset=offset, limit=20)
+        subs = js.get("submissions_dump") or []
+        if not subs:
             break
 
-        for sub in sublist:
-            try:
-                ts = int(sub.get("timestamp", 0))
-            except Exception:
-                continue
+        for it in subs:
+            scanned += 1
 
-            # 增量：只处理比上次新的
-            if ts <= last_ts:
-                continue
-            new_last_ts = max(new_last_ts, ts)
+            sid = int(it.get("id") or 0)
+            ts = int(it.get("timestamp") or 0)
+            status = (it.get("status_display") or "").strip()
+            title = (it.get("title") or "").strip()
+            # 注意：leetcode.cn 返回的 title 可能不含题号
+            if ts > max_seen_ts:
+                max_seen_ts = ts
+
+            if ts <= last_timestamp:
+                stop = True
+                break
 
             # 只要 AC
-            if sub.get("statusDisplay") != "Accepted":
+            if status.lower() != "accepted" and status != "通过":
+                # 仍然要把 id 标记 seen，否则每次都扫到它
+                if sid:
+                    seen_ids.add(sid)
                 continue
 
-            if pulled >= MAX_DETAIL_PER_RUN:
-                # 到上限就保存 watermark 并结束
-                state["last_timestamp"] = max(new_last_ts, last_ts)
-                save_state(state)
-                print(f"ℹ️ Reach MAX_DETAIL_PER_RUN={MAX_DETAIL_PER_RUN}, stop early. wrote={wrote}, skip_no_comment={skip_no_comment}, last_timestamp={state['last_timestamp']}")
-                return
+            if sid in seen_ids:
+                continue
 
-            sid = int(sub["id"])
-            lang_list = (sub.get("lang") or "").lower().strip()
+            code = fetch_submission_code(sess, sid)
+            seen_ids.add(sid)
 
-            time.sleep(SLEEP_BETWEEN_DETAIL + random.random() * 0.6)
+            if not code:
+                continue
 
-            try:
-                detail = gql(s, Q_SUBMISSION_DETAIL, {"submissionId": str(sid)}, operation_name="submissionDetail")
-            except RateLimitError:
-                state["last_timestamp"] = max(new_last_ts, last_ts)
-                save_state(state)
-                print("⚠️ Hit rate limit. Saved state and exit gracefully.")
-                print(f"✅ wrote={wrote}, skip_no_comment={skip_no_comment}, last_timestamp={state['last_timestamp']}")
-                return
-
-            pulled += 1
-            info = detail.get("submissionDetail") or {}
-            code = info.get("code") or ""
-            lang_detail = (info.get("lang") or lang_list).lower().strip()
-
-            parsed = parse_header_classification(code)
-            if parsed is None:
+            parsed = parse_header_path(code)
+            if not parsed:
                 skip_no_comment += 1
                 continue
 
-            levels, pid, title, ext_hint = parsed
+            folders, pid, prob_title, ext = parsed
+            out_path = write_solution_file(folders, pid, prob_title, ext, code)
 
-            # ext：优先用注释里写的 .cpp，否则用 lang 映射；C++ 强制 cpp
-            ext = ext_hint or code_ext_from_lang(lang_detail)
-            if lang_detail in CPP_ALIASES:
-                ext = "cpp"
-
-            out_path = build_target_path(levels, pid, title, ext)
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-
-            # 不覆盖
-            if out_path.exists():
-                continue
-
-            out_path.write_text(code, encoding="utf-8", newline="\n")
             wrote += 1
+            added_items.append({
+                "pid": pid,
+                "title": prob_title,
+                "path": out_path.relative_to(REPO_ROOT).as_posix(),
+                "timestamp": ts,
+                "lang": it.get("lang", ""),
+                "submission_id": sid,
+            })
 
-        time.sleep(0.25 + random.random() * 0.3)
+            if wrote >= MAX_DETAIL_PER_RUN:
+                break
 
-    # 保存 watermark
-    if new_last_ts != last_ts:
-        state["last_timestamp"] = new_last_ts
-        save_state(state)
+        offset += 20
 
-    print(f"✅ done. wrote={wrote}, skip_no_comment={skip_no_comment}, last_timestamp={state.get('last_timestamp', last_ts)}")
+    # 更新水位：以“扫描到的最大 timestamp”为准（避免每次重复扫旧提交）
+    if max_seen_ts > last_timestamp:
+        last_timestamp = max_seen_ts
+
+    state_out = {
+        "last_timestamp": int(last_timestamp),
+        "seen_ids": sorted(list(seen_ids))[-2000:],  # 控制体积，保留最近 2000 个
+    }
+    write_json(STATE_PATH, state_out)
+
+    report = {
+        "generated_at": int(time.time()),
+        "last_timestamp": int(last_timestamp),
+        "wrote": int(wrote),
+        "skip_no_comment": int(skip_no_comment),
+        "scanned": int(scanned),
+        "added": added_items,
+    }
+    write_json(LAST_REPORT_PATH, report)
+
+    # stdout 便于 Actions 日志定位
+    msg = f"ℹ️ Reach MAX_DETAIL_PER_RUN={MAX_DETAIL_PER_RUN}, stop early." if wrote >= MAX_DETAIL_PER_RUN else "ℹ️ Sync done."
+    print(msg)
+    print(f"✅ wrote {wrote} file(s). skip_no_comment={skip_no_comment}, last_timestamp={last_timestamp}, scanned={scanned}")
 
 
 if __name__ == "__main__":
