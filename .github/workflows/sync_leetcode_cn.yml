@@ -2,6 +2,11 @@
 
 on:
   workflow_dispatch:
+    inputs:
+      reset_sync_state:
+        description: "Reset sync watermark/state (true/false)"
+        required: false
+        default: "false"
   schedule:
     - cron: "10 */3 * * *"   # every 3 hours (UTC)
 
@@ -35,6 +40,7 @@ jobs:
         env:
           LEETCODE_CN_CSRF_TOKEN: ${{ secrets.LEETCODE_CN_CSRF_TOKEN }}
           LEETCODE_CN_SESSION: ${{ secrets.LEETCODE_CN_SESSION }}
+          RESET_SYNC_STATE: ${{ inputs.reset_sync_state }}
         run: |
           mkdir -p data
           python -u tools/sync_leetcode_cn.py

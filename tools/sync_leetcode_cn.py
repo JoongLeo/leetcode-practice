@@ -1,10 +1,10 @@
-# tools/sync_leetcode_cn.py
+﻿# tools/sync_leetcode_cn.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import json
 import os
 import re
-import json
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -18,13 +18,23 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 STATE_PATH = DATA_DIR / "leetcode_cn_sync_state.json"
 LAST_REPORT_PATH = DATA_DIR / "last_sync_report.json"
 
-# 一次最多抓多少个 submission detail（避免太慢/风控）
+# Max number of submission details per run (avoid throttling).
 MAX_DETAIL_PER_RUN = int(os.getenv("MAX_DETAIL_PER_RUN", "8"))
 
-# 你的首行注释规范：
- # // 一级-二级-2841. 题名.cpp
+# Allowed acceptance statuses (case-insensitive, comma-separated).
+ACCEPTED_STATUSES = {
+    s.strip().casefold()
+    for s in os.getenv("ACCEPTED_STATUSES", "accepted,通过").split(",")
+    if s.strip()
+}
+
+# Header format:
+# // 一级-二级-2841. 题名.cpp
 HEADER_RE = re.compile(r"^\s*(?://|#)\s*(.+?)\s*$")
-FILENAME_TAIL_RE = re.compile(r"^\s*(\d+)\.\s*(.+?)\.(cpp|py|java|js|ts|go|rs|c|cs|kt|swift|rb|php|txt)\s*$", re.IGNORECASE)
+FILENAME_TAIL_RE = re.compile(
+    r"^\s*(\d+)\.\s*(.+?)\.(cpp|py|java|js|ts|go|rs|c|cs|kt|swift|rb|php|txt)\s*$",
+    re.IGNORECASE,
+)
 
 
 def read_json(p: Path, default: Any) -> Any:
@@ -42,10 +52,10 @@ def write_json(p: Path, obj: Any) -> None:
 
 
 def safe_name(s: str) -> str:
-    # Windows/跨平台安全：去掉路径分隔/非法字符
+    # Windows/cross-platform safe path component.
     s = s.strip()
-    s = s.replace("/", "／").replace("\\", "＼")
-    s = re.sub(r'[<>:"|?*]', "，", s)
+    s = s.replace("/", "_").replace("\\", "_")
+    s = re.sub(r"[<>:\"|?*]", "_", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
@@ -57,20 +67,22 @@ def get_session() -> requests.Session:
         raise RuntimeError("Missing env: LEETCODE_CN_CSRF_TOKEN / LEETCODE_CN_SESSION")
 
     s = requests.Session()
-    # leetcode.cn 常见 cookie 名称
+    # leetcode.cn cookie names
     s.cookies.set("csrftoken", csrf, domain="leetcode.cn")
     s.cookies.set("LEETCODE_SESSION", sess, domain="leetcode.cn")
-    s.headers.update({
-        "User-Agent": "Mozilla/5.0",
-        "Referer": "https://leetcode.cn/",
-        "Origin": "https://leetcode.cn",
-        "X-CSRFToken": csrf,
-    })
+    s.headers.update(
+        {
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://leetcode.cn/",
+            "Origin": "https://leetcode.cn",
+            "X-CSRFToken": csrf,
+        }
+    )
     return s
 
 
 def fetch_recent_submissions(sess: requests.Session, offset: int = 0, limit: int = 20) -> Dict[str, Any]:
-    # 这个接口在 leetcode.cn 账号登录态下可用
+    # This endpoint requires a logged-in leetcode.cn session.
     url = f"https://leetcode.cn/api/submissions/?offset={offset}&limit={limit}"
     r = sess.get(url, timeout=30)
     r.raise_for_status()
@@ -78,7 +90,7 @@ def fetch_recent_submissions(sess: requests.Session, offset: int = 0, limit: int
 
 
 def try_fetch_submission_code_graphql(sess: requests.Session, submission_id: int) -> Optional[str]:
-    # GraphQL（更稳），如果被限制会返回 None
+    # GraphQL (preferred). Returns None on failure/limit.
     url = "https://leetcode.cn/graphql/"
     payload = {
         "operationName": "submissionDetail",
@@ -89,7 +101,7 @@ query submissionDetail($submissionId: Int!) {
     code
   }
 }
-""".strip()
+""".strip(),
     }
     try:
         r = sess.post(url, json=payload, timeout=30)
@@ -103,7 +115,7 @@ query submissionDetail($submissionId: Int!) {
 
 
 def try_fetch_submission_code_html(sess: requests.Session, submission_id: int) -> Optional[str]:
-    # 兜底：抓 detail 页面，从 HTML 里提取 code（可能会随站点更新变化）
+    # Fallback: scrape detail page HTML for code (fragile).
     url = f"https://leetcode.cn/submissions/detail/{submission_id}/"
     try:
         r = sess.get(url, timeout=30)
@@ -111,7 +123,7 @@ def try_fetch_submission_code_html(sess: requests.Session, submission_id: int) -
             return None
         text = r.text
 
-        # 常见：页面里会有 "code":"...." 的 JSON 字段
+        # Most pages embed a JSON "code" field.
         m = re.search(r'"code"\s*:\s*"((?:\\.|[^"\\])*)"', text)
         if not m:
             return None
@@ -132,10 +144,10 @@ def fetch_submission_code(sess: requests.Session, submission_id: int) -> Optiona
 
 def parse_header_path(code: str) -> Optional[Tuple[List[str], int, str, str]]:
     """
-    从首行注释解析：
-    - folders: [一级, 二级, ...]（至少 1 级；通常 2 级）
-    - pid: 题号
-    - title: 题名（来自注释尾段）
+    Parse first-line comment into:
+    - folders: [level1, level2, ...] (>= 1 level)
+    - pid: problem id
+    - title: problem title from the tail
     - ext: cpp/py/...
     """
     lines = code.splitlines()
@@ -182,7 +194,7 @@ def write_solution_file(folders: List[str], pid: int, title: str, ext: str, code
     filename = f"{pid}. {title}.{ext}"
     out_path = out_dir / filename
 
-    # 若存在且内容相同就不写
+    # Skip writing if identical.
     if out_path.exists():
         old = out_path.read_text(encoding="utf-8", errors="ignore")
         if old == code:
@@ -195,20 +207,25 @@ def write_solution_file(folders: List[str], pid: int, title: str, ext: str, code
 def main():
     sess = get_session()
 
+    if os.getenv("RESET_SYNC_STATE", "").strip().lower() in {"1", "true", "yes"}:
+        STATE_PATH.unlink(missing_ok=True)
     state = read_json(STATE_PATH, default={"last_timestamp": 0, "seen_ids": []})
     last_timestamp = int(state.get("last_timestamp", 0) or 0)
     seen_ids = set(int(x) for x in (state.get("seen_ids") or []) if str(x).isdigit())
 
     wrote = 0
     skip_no_comment = 0
+    skip_no_code = 0
+    skip_not_accepted = 0
     scanned = 0
     max_seen_ts = last_timestamp
 
     added_items: List[Dict[str, Any]] = []
 
-    # 拉最新提交列表（多翻几页，直到遇到 <= last_timestamp）
+    # Fetch recent submissions until we hit the saved watermark.
     offset = 0
     stop = False
+    stop_reason = ""
 
     while not stop and wrote < MAX_DETAIL_PER_RUN:
         js = fetch_recent_submissions(sess, offset=offset, limit=20)
@@ -222,20 +239,21 @@ def main():
             sid = int(it.get("id") or 0)
             ts = int(it.get("timestamp") or 0)
             status = (it.get("status_display") or "").strip()
-            title = (it.get("title") or "").strip()
-            # 注意：leetcode.cn 返回的 title 可能不含题号
+
             if ts > max_seen_ts:
                 max_seen_ts = ts
 
             if ts <= last_timestamp:
                 stop = True
+                stop_reason = "watermark"
                 break
 
-            # 只要 AC
-            if status.lower() != "accepted" and status != "通过":
-                # 仍然要把 id 标记 seen，否则每次都扫到它
+            # Only keep accepted submissions.
+            if status.casefold() not in ACCEPTED_STATUSES:
+                # Still mark id as seen to avoid repeated scans.
                 if sid:
                     seen_ids.add(sid)
+                skip_not_accepted += 1
                 continue
 
             if sid in seen_ids:
@@ -245,6 +263,7 @@ def main():
             seen_ids.add(sid)
 
             if not code:
+                skip_no_code += 1
                 continue
 
             parsed = parse_header_path(code)
@@ -256,27 +275,32 @@ def main():
             out_path = write_solution_file(folders, pid, prob_title, ext, code)
 
             wrote += 1
-            added_items.append({
-                "pid": pid,
-                "title": prob_title,
-                "path": out_path.relative_to(REPO_ROOT).as_posix(),
-                "timestamp": ts,
-                "lang": it.get("lang", ""),
-                "submission_id": sid,
-            })
+            added_items.append(
+                {
+                    "pid": pid,
+                    "title": prob_title,
+                    "path": out_path.relative_to(REPO_ROOT).as_posix(),
+                    "timestamp": ts,
+                    "lang": it.get("lang", ""),
+                    "submission_id": sid,
+                }
+            )
 
             if wrote >= MAX_DETAIL_PER_RUN:
+                stop_reason = "max_detail"
                 break
 
         offset += 20
+        if wrote >= MAX_DETAIL_PER_RUN:
+            break
 
-    # 更新水位：以“扫描到的最大 timestamp”为准（避免每次重复扫旧提交）
-    if max_seen_ts > last_timestamp:
+    # Only advance watermark if we fully scanned past the previous watermark.
+    if not stop_reason and max_seen_ts > last_timestamp:
         last_timestamp = max_seen_ts
 
     state_out = {
         "last_timestamp": int(last_timestamp),
-        "seen_ids": sorted(list(seen_ids))[-2000:],  # 控制体积，保留最近 2000 个
+        "seen_ids": sorted(list(seen_ids))[-2000:],
     }
     write_json(STATE_PATH, state_out)
 
@@ -285,15 +309,27 @@ def main():
         "last_timestamp": int(last_timestamp),
         "wrote": int(wrote),
         "skip_no_comment": int(skip_no_comment),
+        "skip_no_code": int(skip_no_code),
+        "skip_not_accepted": int(skip_not_accepted),
         "scanned": int(scanned),
+        "stop_reason": stop_reason,
         "added": added_items,
     }
     write_json(LAST_REPORT_PATH, report)
 
-    # stdout 便于 Actions 日志定位
-    msg = f"ℹ️ Reach MAX_DETAIL_PER_RUN={MAX_DETAIL_PER_RUN}, stop early." if wrote >= MAX_DETAIL_PER_RUN else "ℹ️ Sync done."
+    msg = f"Reach MAX_DETAIL_PER_RUN={MAX_DETAIL_PER_RUN}, stop early." if wrote >= MAX_DETAIL_PER_RUN else "Sync done."
     print(msg)
-    print(f"✅ wrote {wrote} file(s). skip_no_comment={skip_no_comment}, last_timestamp={last_timestamp}, scanned={scanned}")
+    print(
+        "wrote {w} file(s). skip_no_comment={snc}, skip_no_code={sn}, "
+        "skip_not_accepted={sna}, last_timestamp={ts}, scanned={sc}".format(
+            w=wrote,
+            snc=skip_no_comment,
+            sn=skip_no_code,
+            sna=skip_not_accepted,
+            ts=last_timestamp,
+            sc=scanned,
+        )
+    )
 
 
 if __name__ == "__main__":
