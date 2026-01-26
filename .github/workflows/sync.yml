@@ -1,4 +1,4 @@
-name: Sync LeetCode Submissions
+name: 🤖 同步 LeetCode 提交
 
 on:
   # 每天北京时间 23:00 自动运行
@@ -8,46 +8,87 @@ on:
   # 手动触发
   workflow_dispatch:
   
-  # 每次 push 到 main 分支时触发（用于测试）
+  # Push 到 main 分支时触发（用于测试）
   push:
     branches: [ main ]
+    paths:
+      - 'sync.py'
+      - '.github/workflows/sync.yml'
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout 代码
+    - name: 📥 Checkout 代码
       uses: actions/checkout@v4
       with:
-        fetch-depth: 0  # 获取完整历史，便于 git 操作
+        fetch-depth: 0
     
-    - name: 设置 Python 环境
+    - name: 🐍 设置 Python 环境
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
     
-    - name: 安装依赖
+    - name: 📦 安装依赖
       run: |
         python -m pip install --upgrade pip
         pip install requests
     
-    - name: 同步 LeetCode 提交
+    - name: 🔄 同步 LeetCode 提交
+      id: sync
       env:
         LEETCODE_CN_SESSION: ${{ secrets.LEETCODE_CN_SESSION }}
         LEETCODE_CN_CSRF_TOKEN: ${{ secrets.LEETCODE_CN_CSRF_TOKEN }}
       run: |
         python sync.py
+        echo "sync_status=$?" >> $GITHUB_OUTPUT
     
-    - name: 提交更改
+    - name: 📝 读取提交信息
+      id: commit_msg
+      if: steps.sync.outputs.sync_status == '0'
+      run: |
+        if [ -f .commit_message.txt ]; then
+          echo "has_updates=true" >> $GITHUB_OUTPUT
+          # 读取提交信息并转义
+          COMMIT_MSG=$(cat .commit_message.txt)
+          echo "commit_message<<EOF" >> $GITHUB_OUTPUT
+          echo "$COMMIT_MSG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+        else
+          echo "has_updates=false" >> $GITHUB_OUTPUT
+        fi
+    
+    - name: 🚀 提交更改
+      if: steps.commit_msg.outputs.has_updates == 'true'
       run: |
         git config --local user.email "github-actions[bot]@users.noreply.github.com"
         git config --local user.name "github-actions[bot]"
         git add .
-        git diff --staged --quiet || git commit -m "🤖 自动同步 LeetCode 提交 $(date +'%Y-%m-%d %H:%M:%S')"
+        
+        # 使用自定义提交信息
+        if [ -f .commit_message.txt ]; then
+          git commit -F .commit_message.txt
+          rm .commit_message.txt
+        else
+          git commit -m "🤖 自动同步 LeetCode 提交"
+        fi
     
-    - name: 推送到 GitHub
+    - name: 📤 推送到 GitHub
+      if: steps.commit_msg.outputs.has_updates == 'true'
       uses: ad-m/github-push-action@master
       with:
         github_token: ${{ secrets.GITHUB_TOKEN }}
         branch: ${{ github.ref }}
+    
+    - name: ✅ 同步完成
+      if: steps.commit_msg.outputs.has_updates == 'true'
+      run: |
+        echo "✅ 同步成功！已推送到 GitHub"
+        echo "📝 提交信息："
+        cat .commit_message.txt 2>/dev/null || echo "无提交信息文件"
+    
+    - name: ℹ️ 无更新
+      if: steps.commit_msg.outputs.has_updates != 'true'
+      run: |
+        echo "ℹ️ 没有新的提交需要同步"
