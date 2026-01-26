@@ -1,5 +1,5 @@
-# leetcode_sync
+# workflows
 
 <!-- AUTO-GENERATED:START -->
-_（暂无小类目录）_
+_（空目录）_
 <!-- AUTO-GENERATED:END -->

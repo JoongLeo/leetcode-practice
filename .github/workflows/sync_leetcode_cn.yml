@@ -40,7 +40,7 @@ jobs:
 
       - name: Update README (auto)
         run: |
-          python tools/update_readme.py --sync-plan
+          python tools/update_readme.py
 
       - name: Commit & push if changed
         run: |
