@@ -36,6 +36,7 @@ jobs:
           LEETCODE_CN_CSRF_TOKEN: ${{ secrets.LEETCODE_CN_CSRF_TOKEN }}
           LEETCODE_CN_SESSION: ${{ secrets.LEETCODE_CN_SESSION }}
         run: |
+          mkdir -p data
           python -u tools/sync_leetcode_cn.py
 
       - name: Update README (auto)
@@ -56,8 +57,6 @@ jobs:
           git add README.md || true
           if [ -d tools ]; then git add tools; fi
           if [ -d data ]; then git add data; fi
-
-          # 你现在已有的顶层分类目录（可继续加）
           if [ -d "滑动窗口与双指针" ]; then git add "滑动窗口与双指针"; fi
 
           # 没有 staged 变化就退出
@@ -68,29 +67,23 @@ jobs:
 
           # 从 data/last_sync_report.json 读取本次新增题号，生成更人性化的提交信息
           IDS=$(python - <<'PY'
-import json, os
-p = "data/last_sync_report.json"
-if not os.path.exists(p):
-    print("")
-    raise SystemExit
-d = json.load(open(p, "r", encoding="utf-8"))
-
-# 兼容不同字段名（你用哪个都行）
-ids = d.get("new_problem_ids") or d.get("new_ids") or d.get("added_ids") or []
-
-# 统一为 int、去重、排序
-out = []
-try:
-    out = sorted({int(x) for x in ids})
-except Exception:
-    out = []
-
-print(",".join(map(str, out)))
-PY
-)
+          import json, os
+          p = "data/last_sync_report.json"
+          if not os.path.exists(p):
+              print("")
+              raise SystemExit
+          d = json.load(open(p, "r", encoding="utf-8"))
+          ids = d.get("new_problem_ids") or d.get("new_ids") or d.get("added_ids") or []
+          try:
+              out = sorted({int(x) for x in ids})
+          except Exception:
+              out = []
+          print(",".join(map(str, out)))
+          PY
+          )
 
           if [ -n "$IDS" ]; then
-            MSG="[Auto] LC ${IDS//,/\, }"
+            MSG="[Auto] LC ${IDS//,/, }"
           else
             MSG="[Auto] Sync LeetCode CN + Update README"
           fi
