@@ -3,7 +3,11 @@ name: Sync from leetcode.cn
 on:
   workflow_dispatch:
   schedule:
-    - cron: "10 * * * *"  # 每小时一次（UTC）
+    - cron: "10 */3 * * *"
+
+concurrency:
+  group: leetcode-cn-sync
+  cancel-in-progress: true
 
 permissions:
   contents: write
