@@ -111,7 +111,7 @@ query submissionList($offset: Int!, $limit: Int!) {
 """
 
 Q_SUBMISSION_DETAIL = r"""
-query submissionDetail($submissionId: Int!) {
+query submissionDetail($submissionId: ID!) {
   submissionDetail(submissionId: $submissionId) {
     code
     lang
@@ -177,7 +177,7 @@ def main():
             detail = gql(
                 s,
                 Q_SUBMISSION_DETAIL,
-                {"submissionId": sid},
+                {"submissionId": str(sid)},
                 operation_name="submissionDetail",
             )
             info = detail.get("submissionDetail") or {}
