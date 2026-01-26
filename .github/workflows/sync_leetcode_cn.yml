@@ -27,7 +27,7 @@ jobs:
 
       - name: Sync submissions
         env:
-          LEETCODE_SESSION: ${{ secrets.LEETCODE_SESSION }}
-          LEETCODE_CSRF: ${{ secrets.LEETCODE_CSRF }}
+          LEETCODE_SESSION: ${{ secrets.LEETCODE_CN_SESSION }}
+          LEETCODE_CSRF: ${{ secrets.LEETCODE_CN_CSRF_TOKEN }}
         run: |
           python tools/sync_leetcode_cn.py --commit --push
