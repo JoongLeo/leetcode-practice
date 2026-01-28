@@ -3,7 +3,7 @@ name: 🤖 同步 LeetCode 提交
 on:
   # 每3小时自动运行一次
   schedule:
-    - cron: '0 */3 * * *'  # 每3小时的整点运行（UTC时间）
+    - cron: '0 16 * * *'  # UTC 时间每天 16:00，即北京时间次日 00:00
   
   # 手动触发
   workflow_dispatch:
